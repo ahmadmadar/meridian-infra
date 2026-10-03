@@ -1,0 +1,31 @@
+# Terraform state. Local state holds every resource attribute in
+# plaintext, including DB passwords from Session 2 onward. Never commit.
+*.tfstate
+*.tfstate.*
+
+# Provider plugins and module cache, re-created by `terraform init`
+.terraform/
+
+# Real variable values (secrets). Only the .example file is committed.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Saved plan files can embed sensitive values too
+*.tfplan
+tfplan
+
+# Crash logs and local CLI overrides
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Personal Claude Code settings (the shared .claude/settings.json is committed)
+.claude/settings.local.json
+
+.DS_Store

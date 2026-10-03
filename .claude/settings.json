@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "ask": [
+      "Bash(terraform apply*)",
+      "Bash(terraform destroy*)",
+      "Bash(terraform -chdir=* apply*)",
+      "Bash(terraform -chdir=* destroy*)"
+    ]
+  }
+}
