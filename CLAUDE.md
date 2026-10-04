@@ -153,31 +153,33 @@ interviews.
 
 ## Current build status
 
-Session 1 complete (2026-10-02), infrastructure destroyed.
+Session 2 complete (2026-10-03), infrastructure destroyed.
 
-- `docs/architecture.md` has the decisions doc: Fargate+ALB vs. App
-  Runner, no NAT Gateway, private RDS, local state, account
-  constraints, and the HTTPS open question.
-- `modules/network` + `envs/poc` are applied and verified against AWS,
-  then destroyed. They contain:
-  - VPC `10.0.0.0/16` and an IGW,
-  - public subnets `10.0.0.0/24` and `10.0.1.0/24`, private subnets
-    `10.0.10.0/24` and `10.0.11.0/24` (us-east-2a/b),
-  - three security groups, ALB → app (3001) → db (5432), each
-    referencing the previous one by ID,
-  - the default security group, stripped of all rules.
-- Module outputs (`private_subnet_ids`, `db_security_group_id`, etc.)
-  are ready for Session 2 to consume.
+- Session 1: `docs/architecture.md` (decisions 1–5) and `modules/network`
+  (VPC `10.0.0.0/16`, 2 public + 2 private subnets in us-east-2a/b, IGW,
+  ALB → app (3001) → db (5432) security groups, locked default SG).
+- Session 2: `modules/database` (RDS Postgres 16, `db.t4g.micro`,
+  private, encrypted, no backups) and `modules/secrets` (three secrets
+  under `meridian-poc/`: `database-url`, `mcp-key-agent`,
+  `mcp-key-dashboard`).
+  - Secrets are write-only: ephemeral `random_password` +
+    `password_wo` / `secret_string_wo`, nothing in state. Rotate by
+    bumping `credentials_version` in `envs/poc/main.tf`. See decision 6.
+  - `module.secrets.secret_arns` is ready for Session 3's task
+    definition and execution role policy.
+  - **Owed to Session 3:** a real DB connection from inside the VPC
+    (ECS Exec `psql`, or the app's first query). Session 2 verified
+    only through AWS describe calls, since nothing inside the VPC can
+    reach RDS yet.
 - Bring it back with `terraform -chdir=envs/poc plan -out=tfplan`,
-  then review the plan and run `terraform -chdir=envs/poc apply tfplan`.
-  This needs `envs/poc/terraform.tfvars` (copy the `.example`) and a
-  live `aws login --profile meridian` session.
+  then review and run `terraform -chdir=envs/poc apply tfplan`. This
+  needs `envs/poc/terraform.tfvars` (copy the `.example`) and a live
+  `aws login --profile meridian`. RDS takes several minutes to create.
 
 ## Next steps
 
 1. ~~Session 1: Terraform foundations + decisions doc.~~ Done.
-2. Session 2: RDS Postgres (private subnet) + Secrets Manager (DB
-   creds + the two MCP API keys).
+2. ~~Session 2: RDS Postgres + Secrets Manager.~~ Done.
 3. Session 3: ECR + ECS cluster/service on Fargate behind an ALB.
    Verify against a real request, not just a health check. Open
    question: HTTPS. An ALB has no free TLS on its default DNS name, so
