@@ -1,5 +1,5 @@
-# Terraform state. Local state holds every resource attribute in
-# plaintext, including DB passwords from Session 2 onward. Never commit.
+# Terraform state. Secrets are write-only and never stored here (see
+# docs/architecture.md, decision 6), but state still maps every resource. Never commit.
 *.tfstate
 *.tfstate.*
 

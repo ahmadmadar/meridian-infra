@@ -41,6 +41,12 @@ against the real resources with read-only AWS CLI calls, then destroy.
 - [x] `envs/poc/`: provider config, module wiring, tfvars example
 - [x] Post-apply verification commands (security group rules, routes,
       subnets checked against AWS directly)
+- [x] `modules/database/`: RDS Postgres 16 subnet group + instance,
+      ephemeral master password via `password_wo`
+- [x] `modules/secrets/`: 3 Secrets Manager secrets with write-only
+      versions, generated MCP keys, replacement guard for `DATABASE_URL`
+- [x] Secret-safe verification: checks each secret's format and that no
+      secret value appears in the state file, without printing any value
 
 ## What required architectural decisions
 
@@ -54,6 +60,15 @@ against the real resources with read-only AWS CLI calls, then destroy.
   group.
 - **Security groups reference each other by ID** (ALB → app → db), so
   the database can never be opened to an IP range by accident.
+- **Write-only secrets instead of passwords in state.** Ephemeral values
+  plus `*_wo` arguments keep the DB password and MCP keys out of state
+  entirely. I accepted that Terraform can't detect drift on them, and
+  that rotation means bumping a version number.
+- **Terraform generates the MCP keys** rather than me supplying them, so
+  no human ever sees or types a key.
+- **The end-to-end `psql` check moves to Session 3.** RDS is private and
+  there's no compute yet. Opening a temporary public path just to tick
+  the box would undo decision 3.
 
 ## What got caught and corrected
 
@@ -76,6 +91,19 @@ against the real resources with read-only AWS CLI calls, then destroy.
   in the plan. Checked after apply with `describe-security-group-rules`:
   exactly the 7 designed rules, and no outbound rule at all on the
   database security group.
+- **A silent password mismatch on RDS replacement.** While designing the
+  write-only flow, Claude spotted that replacing the RDS instance would
+  send it a fresh ephemeral password, but the `DATABASE_URL` secret
+  wouldn't be rewritten, because its version number hadn't changed. The
+  fix was a `terraform_data` tracking the instance's `resource_id`, with
+  `replace_triggered_by` on the secret version.
+- **`for_each` over an ephemeral resource.** Claude's first draft of the
+  secrets module looped over the ephemeral `random_password` itself.
+  Ephemeral values can't drive `for_each`, so Claude rewrote it to loop
+  over a static set of names before running `validate`.
+- **The docs were stale after the design changed.** Decision 4 and the
+  `.gitignore` comment both said state holds the DB password. Both were
+  rewritten once write-only secrets made that false.
 
 ---
 
@@ -120,3 +148,49 @@ the plan, then applied it.
 **Torn down** with `terraform destroy` at the end of the session,
 following the destroy-between-sessions convention, even though this
 layer costs nothing. That also proves the teardown works from day one.
+
+### 2026-10-03: Session 2, RDS + Secrets Manager
+
+**Design.** The walkthrough happened the evening before. I paused
+overnight with two decisions open and answered them today: write-only
+secrets, and Terraform-generated MCP keys. I also agreed to defer the
+`psql` connection test to Session 3. In learning mode: RDS ≈ Azure
+Database for PostgreSQL Flexible Server, but private access works
+differently (a DB subnet group across two AZs plus a security group on
+the instance, rather than a delegated subnet with NSGs). Secrets Manager
+≈ Key Vault, except each secret is a standalone, separately priced
+resource rather than an entry in a vault, and its recovery window works
+like Key Vault soft-delete (hence `recovery_window_in_days = 0`).
+
+**Built.** `modules/database` and `modules/secrets`, wired together in
+`envs/poc`. `DATABASE_URL` is built in the root module from the
+database outputs plus the ephemeral password. The plan was 32 resources
+(the network rebuilt, plus 2 database and 7 secrets resources), with
+every secret argument shown only as `(write-only attribute)`. I
+reviewed it and applied it; RDS took most of the time.
+
+**Verified for real:**
+
+- RDS is `available` on `db.t4g.micro` / Postgres 16.13,
+  `PubliclyAccessible=false`, encrypted gp3, in the two private
+  subnets, with only the db security group attached,
+- the db security group's only inbound rule is 5432 from the app
+  security group, with no CIDR,
+- the private route table has only the `local` route, so there is no
+  path to the internet,
+- `rds.force_ssl = 1`, which matches `sslmode=require` in the URL,
+- `DATABASE_URL` matches the expected format and host, and both MCP
+  keys are 48-character alphanumeric strings. Checked by pattern
+  without printing any value,
+- none of the three secret values appear anywhere in
+  `terraform.tfstate`,
+- a second `plan` reports no changes, so the ephemeral values don't
+  cause drift.
+
+Not yet verified: a real connection to the database. That needs
+compute inside the VPC and is owed in Session 3.
+
+**Torn down** with `terraform destroy`: 32 resources. Afterwards I
+checked that no RDS instances, snapshots, secrets (including any
+scheduled for deletion) or non-default VPCs were left, and that state
+was empty.

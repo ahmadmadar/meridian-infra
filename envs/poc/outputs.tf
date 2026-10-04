@@ -17,3 +17,12 @@ output "security_group_ids" {
     db  = module.network.db_security_group_id
   }
 }
+
+output "db_address" {
+  description = "Private hostname; reachable only from inside the VPC."
+  value       = module.database.address
+}
+
+output "secret_arns" {
+  value = module.secrets.secret_arns
+}
