@@ -3,3 +3,6 @@
 
 region      = "us-east-2"
 aws_profile = "meridian"
+
+# App image to run: the git short SHA pushed to ECR (see CLAUDE.md bring-up).
+image_tag = "e5cbf50"

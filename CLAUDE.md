@@ -146,14 +146,13 @@ resource or Terraform change, extend step 2 of the session workflow
 Keep this concise — a few sentences per concept, not a lecture. Don't
 re-explain something already covered earlier in the project; a short
 "same SG-to-SG pattern as the database security group from Session 1"
-is enough on repeat. This habit is itself worth preserving in
-`docs/ai-assisted-delivery.md` as part of the AI-assisted delivery
-story — the explain-before-build discipline is also useful evidence for
-interviews.
+is enough on repeat. These explanations stay in the conversation: don't
+write them into `docs/ai-assisted-delivery.md`, whose engagement log is
+build-focused (what was built, decided, verified, caught and torn down).
 
 ## Current build status
 
-Session 2 complete (2026-10-03), infrastructure destroyed.
+Session 3a complete (2026-10-05), infrastructure destroyed.
 
 - Session 1: `docs/architecture.md` (decisions 1–5) and `modules/network`
   (VPC `10.0.0.0/16`, 2 public + 2 private subnets in us-east-2a/b, IGW,
@@ -161,30 +160,60 @@ Session 2 complete (2026-10-03), infrastructure destroyed.
 - Session 2: `modules/database` (RDS Postgres 16, `db.t4g.micro`,
   private, encrypted, no backups) and `modules/secrets` (three secrets
   under `meridian-poc/`: `database-url`, `mcp-key-agent`,
-  `mcp-key-dashboard`).
-  - Secrets are write-only: ephemeral `random_password` +
-    `password_wo` / `secret_string_wo`, nothing in state. Rotate by
-    bumping `credentials_version` in `envs/poc/main.tf`. See decision 6.
-  - `module.secrets.secret_arns` is ready for Session 3's task
-    definition and execution role policy.
-  - **Owed to Session 3:** a real DB connection from inside the VPC
-    (ECS Exec `psql`, or the app's first query). Session 2 verified
-    only through AWS describe calls, since nothing inside the VPC can
-    reach RDS yet.
-- Bring it back with `terraform -chdir=envs/poc plan -out=tfplan`,
-  then review and run `terraform -chdir=envs/poc apply tfplan`. This
-  needs `envs/poc/terraform.tfvars` (copy the `.example`) and a live
-  `aws login --profile meridian`. RDS takes several minutes to create.
+  `mcp-key-dashboard`). Secrets are write-only (ephemeral
+  `random_password` + `password_wo` / `secret_string_wo`), nothing in
+  state. Rotate by bumping `credentials_version` in `envs/poc/main.tf`.
+  See decision 6.
+- Session 3a: `modules/compute` (ECR repo `meridian-poc/mcp-server`,
+  ECS cluster + Fargate ARM64 service + task definition, scoped
+  execution/task IAM roles, internal ALB in the private subnets) and
+  `modules/observability` (just the app log group so far; Session 5
+  adds alarms + Budget). Decisions 7–10.
+  - Verified: target healthy, `prisma migrate deploy` ran against RDS,
+    one-off seed task wrote 20 accounts / 60 tickets / 1 incident, and
+    an ECS Exec read-back over SSL. Session 2's owed DB test is paid.
+  - The ALB is internal and has no listener reachable from outside the
+    VPC. It's only reachable publicly once 3b adds CloudFront. The ALB
+    SG still has the Session 1 80/443-from-anywhere rules; 3b replaces
+    them with the CloudFront VPC origin's SG.
+  - **App repo follow-ups** (meridian-fde-enterprise-demo): ECR basic
+    scan of `e5cbf50` found 7 critical / 33 high, all Debian OS packages
+    in `node:20-slim` (Node 20 is EOL since 2026-04). Move to a current
+    Node LTS slim base, and install `openssl` (Prisma warns it can't
+    detect it). Natural fit for Session 4's CI work.
+
+### Bring-up runbook
+
+Needs a live `aws login --profile meridian`, Docker running, and
+`envs/poc/terraform.tfvars` (copy the `.example`; `image_tag` is the app
+repo's git short SHA).
+
+1. ECR first (decision 9):
+   `terraform -chdir=envs/poc plan -target=module.compute.aws_ecr_repository.app -target=module.compute.aws_ecr_lifecycle_policy.app -out=tfplan`,
+   review, `terraform -chdir=envs/poc apply tfplan`.
+2. Push the image from the app repo's `main` (tags are immutable):
+   `aws ecr get-login-password --profile meridian --region us-east-2 | docker login --username AWS --password-stdin <account>.dkr.ecr.us-east-2.amazonaws.com`,
+   then `docker build --platform linux/arm64 --provenance=false --sbom=false -t <repo_url>:<sha> .`
+   and `docker push <repo_url>:<sha>`. Without the two flags Docker
+   Desktop pushes an image index the scan and lifecycle rule mishandle.
+3. Everything else: `terraform -chdir=envs/poc plan -out=tfplan`,
+   review, apply. ~10 minutes (RDS); the apply waits for the service to
+   be healthy.
+4. Seed (fresh DB each bring-up): `aws ecs run-task` with the
+   `task_definition` output, the public subnets, the app SG,
+   `assignPublicIp=ENABLED`, and a container override command
+   `["npx","tsx","prisma/seed.ts"]`.
+5. ECS Exec needs the Session Manager plugin
+   (`brew install --cask session-manager-plugin`):
+   `aws ecs execute-command --cluster meridian-poc --task <id> --container mcp-server --interactive --command "sh"`.
 
 ## Next steps
 
 1. ~~Session 1: Terraform foundations + decisions doc.~~ Done.
 2. ~~Session 2: RDS Postgres + Secrets Manager.~~ Done.
 3. Session 3, split in two (decided 2026-10-05):
-   - **3a:** ECR, ECS cluster/service/task definition on Fargate
-     (ARM64), execution + task IAM roles, internal ALB, log group.
-     Verify from inside the VPC via ECS Exec: migrations ran, seed, a
-     real DB query (pays off Session 2's owed connection test).
+   - ~~**3a:** ECR, ECS on Fargate (ARM64), IAM roles, internal ALB,
+     log group, verified from inside the VPC.~~ Done 2026-10-05.
    - **3b:** CloudFront with a VPC origin in front of the internal ALB
      for HTTPS (decision 7: no domain purchase for a POC). Verify a
      real MCP tool call end to end, plus the negative checks (no key →

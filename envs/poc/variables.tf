@@ -15,3 +15,8 @@ variable "aws_profile" {
   description = "AWS CLI profile, signed in via `aws login`."
   type        = string
 }
+
+variable "image_tag" {
+  description = "App image tag in ECR: the meridian-fde-enterprise-demo git short SHA that was pushed."
+  type        = string
+}
