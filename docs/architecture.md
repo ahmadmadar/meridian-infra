@@ -168,6 +168,46 @@ Each secret is its own Secrets Manager resource with
 `recovery_window_in_days = 0`. The default 7–30 day window would reserve
 the names after every `destroy` and break the next `apply`.
 
+## 7. HTTPS through CloudFront with a VPC origin, not a custom domain
+
+An ALB's default DNS name can't get a TLS certificate, and this service
+authenticates with an API key in a request header, so it can't run over
+plain HTTP. I looked at three options:
+
+- **A. CloudFront with a VPC origin pointing at an internal ALB.**
+  CloudFront's default `*.cloudfront.net` domain comes with HTTPS. A VPC
+  origin lets CloudFront reach an ALB in the private subnets over AWS's
+  own network, so the ALB has no public address at all.
+- **B. CloudFront in front of a public ALB.** The ALB would accept only
+  CloudFront's managed prefix list plus a secret origin header. But the
+  hop from CloudFront to the ALB is still plain HTTP over the internet,
+  carrying the API key.
+- **C. A domain I own plus a free ACM certificate on the ALB.** This is
+  the most standard production setup.
+
+**I chose A.** This is a POC, so I'm not buying a domain for it, and
+that's why C is out. A also beats B: the API key is never sent in plain
+text over the internet, and an internal ALB drops two public IPv4
+addresses (about $0.01/hr). The ALB's security group changes from
+"80/443 from anywhere" to "from CloudFront's VPC origin only."
+
+If this were a real production service with a domain already in place,
+I'd use C, with CloudFront added only if caching or edge features were
+needed.
+
+Before choosing A, I checked it against the free plan. CloudFront is on
+the supported list, and only Lambda@Edge is excluded. The free plan's
+service control policy allows all `cloudfront:*` actions, so VPC
+origins are included. It also allows `ssm:*` and `ssmmessages:*`,
+which ECS Exec needs. If a real apply still gets refused, B is the
+fallback.
+
+One related gotcha: as the project nears its spend limit, AWS applies
+another policy. That one denies `cloudfront:CreateDistribution`,
+`ecs:CreateService` and `elasticloadbalancing:CreateLoadBalancer`. If
+this stack's apply suddenly fails with Access Denied, check spend in
+AWS Settings > Billing before debugging IAM.
+
 ## AWS account constraints
 
 - A new-experience project on the free plan, locked to `us-east-2`.
@@ -178,12 +218,3 @@ the names after every `destroy` and break the next `apply`.
 - The free plan's spend cap is a safety net, not a substitute for the
   Budget alarm in Session 5. The alarm tells me when spend is climbing.
   The cap only stops things once it's too late to fix calmly.
-
-## Open questions
-
-- **HTTPS (Session 3).** An ALB's default DNS name can't get a TLS
-  certificate, and this service authenticates with an API key in a
-  header, so it shouldn't run over plain HTTP. The options are a domain
-  I own plus a free ACM certificate, or CloudFront in front of the ALB
-  (CloudFront's default domain comes with HTTPS). I'll decide in
-  Session 3.

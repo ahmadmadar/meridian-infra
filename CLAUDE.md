@@ -180,11 +180,15 @@ Session 2 complete (2026-10-03), infrastructure destroyed.
 
 1. ~~Session 1: Terraform foundations + decisions doc.~~ Done.
 2. ~~Session 2: RDS Postgres + Secrets Manager.~~ Done.
-3. Session 3: ECR + ECS cluster/service on Fargate behind an ALB.
-   Verify against a real request, not just a health check. Open
-   question: HTTPS. An ALB has no free TLS on its default DNS name, so
-   this needs either a domain + ACM certificate or CloudFront in front
-   of the ALB.
+3. Session 3, split in two (decided 2026-10-05):
+   - **3a:** ECR, ECS cluster/service/task definition on Fargate
+     (ARM64), execution + task IAM roles, internal ALB, log group.
+     Verify from inside the VPC via ECS Exec: migrations ran, seed, a
+     real DB query (pays off Session 2's owed connection test).
+   - **3b:** CloudFront with a VPC origin in front of the internal ALB
+     for HTTPS (decision 7: no domain purchase for a POC). Verify a
+     real MCP tool call end to end, plus the negative checks (no key →
+     401, ALB and task IP unreachable from the internet).
 4. Session 4: GitHub Actions — test → build → push to ECR → deploy,
    with a manual approval gate.
 5. Session 5: CloudWatch logs/alarms + the Budget alarm.
