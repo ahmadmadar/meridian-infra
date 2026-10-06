@@ -34,6 +34,8 @@ locals {
   # Bump to rotate the DB password and both MCP keys in one apply.
   # Write-only values are only sent to AWS when this number changes.
   credentials_version = 1
+
+  app_port = 3001 # meridian-fde-enterprise-demo src/server.ts
 }
 
 module "network" {
@@ -44,7 +46,7 @@ module "network" {
   azs                  = ["us-east-2a", "us-east-2b"]
   public_subnet_cidrs  = ["10.0.0.0/24", "10.0.1.0/24"]
   private_subnet_cidrs = ["10.0.10.0/24", "10.0.11.0/24"]
-  app_port             = 3001 # meridian-fde-enterprise-demo src/server.ts
+  app_port             = local.app_port
 }
 
 module "database" {
@@ -65,4 +67,28 @@ module "secrets" {
   database_url        = "postgresql://${module.database.username}:${module.database.master_password}@${module.database.address}:${module.database.port}/${module.database.db_name}?schema=public&sslmode=require"
   db_resource_id      = module.database.resource_id
   credentials_version = local.credentials_version
+}
+
+module "observability" {
+  source = "../../modules/observability"
+
+  name_prefix = local.name_prefix
+}
+
+module "compute" {
+  source = "../../modules/compute"
+
+  name_prefix = local.name_prefix
+  image_tag   = var.image_tag
+  app_port    = local.app_port
+
+  vpc_id                = module.network.vpc_id
+  public_subnet_ids     = module.network.public_subnet_ids
+  private_subnet_ids    = module.network.private_subnet_ids
+  alb_security_group_id = module.network.alb_security_group_id
+  app_security_group_id = module.network.app_security_group_id
+
+  secret_arns    = module.secrets.secret_arns
+  log_group_arn  = module.observability.app_log_group_arn
+  log_group_name = module.observability.app_log_group_name
 }

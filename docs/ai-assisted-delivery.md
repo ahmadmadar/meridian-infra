@@ -47,6 +47,17 @@ against the real resources with read-only AWS CLI calls, then destroy.
       versions, generated MCP keys, replacement guard for `DATABASE_URL`
 - [x] Secret-safe verification: checks each secret's format and that no
       secret value appears in the state file, without printing any value
+- [x] `.dockerignore` for the app repo (kept `.env` out of the image
+      before the first push to ECR)
+- [x] `modules/compute/`: ECR repo + lifecycle policy, ECS cluster,
+      ARM64 Fargate task definition and service, scoped execution and
+      task IAM roles, internal ALB + target group + listener
+- [x] `modules/observability/`: the app log group (alarms come in
+      Session 5)
+- [x] Decisions 7–10 in `docs/architecture.md`, and the bring-up
+      runbook in CLAUDE.md
+- [x] Verification from inside the VPC: a one-off seed task and an ECS
+      Exec query through the app's own Prisma client
 
 ## What required architectural decisions
 
@@ -69,6 +80,24 @@ against the real resources with read-only AWS CLI calls, then destroy.
 - **The end-to-end `psql` check moves to Session 3.** RDS is private and
   there's no compute yet. Opening a temporary public path just to tick
   the box would undo decision 3.
+- **HTTPS via CloudFront with a VPC origin, no custom domain.** This is
+  a POC, so I'm not buying a domain, which rules out ACM on the ALB.
+  CloudFront in front of a *public* ALB would still send the API key
+  over plain HTTP between CloudFront and the ALB, so the ALB is internal
+  and CloudFront reaches it over AWS's network.
+- **Session 3 split into 3a (compute, verified from inside the VPC) and
+  3b (CloudFront, verified end to end)**, so a failure points at one
+  layer.
+- **No temporary public path in 3a.** When I asked how I'd ever show an
+  internal-only service publicly, the answer was 3b's CloudFront, not
+  opening the ALB for a session and closing it again. So 3a checks
+  ALB → app by target health rather than an HTTP call from my laptop.
+- **ARM64 Fargate** to match images built on my Mac (and ~20% cheaper),
+  rather than cross-building x86 under emulation.
+- **Scoped IAM instead of `AmazonECSTaskExecutionRolePolicy`.** The
+  managed policy allows pulling from any repository and writing to any
+  log group. The inline one names this repository, this log group and
+  the three secret ARNs.
 
 ## What got caught and corrected
 
@@ -104,6 +133,35 @@ against the real resources with read-only AWS CLI calls, then destroy.
 - **The docs were stale after the design changed.** Decision 4 and the
   `.gitignore` comment both said state holds the DB password. Both were
   rewritten once write-only secrets made that false.
+- **The app image would have shipped my local `.env`.** The app repo had
+  no `.dockerignore`, so the Dockerfile's `COPY . .` included `.env`.
+  Harmless on Render, which builds from git, but not when pushing an
+  image from my laptop. Claude caught it while reading the Dockerfile
+  during planning. It was fixed and merged in the app repo before
+  anything was pushed, and checked by looking inside a local build.
+- **The first push was an image index, not an image.** Claude's first
+  `docker build` used Docker Desktop's defaults, which add a provenance
+  attestation and push an OCI index. ECR's scan showed nothing, and the
+  untagged image under the tag would have been a target for the
+  "expire untagged" lifecycle rule. Claude spotted it while verifying
+  the push. It deleted those three digests (the tag is immutable),
+  rebuilt with `--provenance=false --sbom=false`, and added the flags
+  to the runbook.
+- **A comment claimed more than the docs say.** The first draft of the
+  IAM trust policy comment stated how ECS fills in `aws:SourceArn`.
+  Claude couldn't back that up, so the comment was rewritten to say
+  only what AWS's ECS docs say: scope to account and Region.
+- **Shell slips during verification.** Twice a multi-word command or
+  list was stored in a zsh variable, and zsh doesn't split variables
+  into words. One delete call sent three digests as a single invalid ID
+  (it failed safely, with nothing deleted), and one batch of read-only
+  checks didn't run. Fixed with environment variables and a proper
+  array.
+- **The image scan surfaced a real problem.** ECR's basic scan of the
+  first image found 7 critical and 33 high findings. All of them were
+  Debian OS packages in `node:20-slim`, and Node 20 has been past
+  end-of-life since April 2026. Logged as an app-repo follow-up rather
+  than patched mid-session.
 
 ---
 
@@ -128,11 +186,7 @@ match so future sessions don't argue for App Runner again. Lambda was
 out because it would mean changing the app, not just the
 infrastructure.
 
-**Built.** After a design walkthrough in learning mode (VPC ≈ VNet but
-AWS subnets sit in a single AZ; no internet path until you add an IGW
-and route, unlike Azure's built-in system routes; security groups ≈
-NSGs but allow-only, stateful, attached to network interfaces, and able
-to reference each other like ASGs), Claude wrote the network module.
+**Built.** After a design walkthrough, Claude wrote the network module.
 `fmt`, `validate` and `plan` were clean: 23 resources, $0. I reviewed
 the plan, then applied it.
 
@@ -154,13 +208,7 @@ layer costs nothing. That also proves the teardown works from day one.
 **Design.** The walkthrough happened the evening before. I paused
 overnight with two decisions open and answered them today: write-only
 secrets, and Terraform-generated MCP keys. I also agreed to defer the
-`psql` connection test to Session 3. In learning mode: RDS ≈ Azure
-Database for PostgreSQL Flexible Server, but private access works
-differently (a DB subnet group across two AZs plus a security group on
-the instance, rather than a delegated subnet with NSGs). Secrets Manager
-≈ Key Vault, except each secret is a standalone, separately priced
-resource rather than an entry in a vault, and its recovery window works
-like Key Vault soft-delete (hence `recovery_window_in_days = 0`).
+`psql` connection test to Session 3.
 
 **Built.** `modules/database` and `modules/secrets`, wired together in
 `envs/poc`. `DATABASE_URL` is built in the root module from the
@@ -194,3 +242,51 @@ compute inside the VPC and is owed in Session 3.
 checked that no RDS instances, snapshots, secrets (including any
 scheduled for deletion) or non-default VPCs were left, and that state
 was empty.
+
+### 2026-10-05: Session 3a, ECR + ECS Fargate + internal ALB
+
+**Design.** I picked HTTPS option A (CloudFront with a VPC origin). I'm
+not buying a domain for a POC, so option C was out. I also split
+Session 3 in two. Before writing anything, Claude checked the free
+plan: everything needed is on the supported list, and the free plan's
+service control policy allows `cloudfront:*`, `ssm:*` and
+`ssmmessages:*`. My live account check showed the free plan active,
+with $119.99 in credits.
+
+**Built.** ECR was applied first with `-target`, then the image
+(`e5cbf50`, arm64) was pushed. The full plan was 43 resources (Sessions
+1–2 re-created, plus 11 new). I reviewed it and applied it. The apply
+only completed once the service was healthy.
+
+**Verified for real:**
+
+- the service runs 1 of 1 tasks, the rollout is `COMPLETED`, and ECS
+  Exec is enabled,
+- the target `10.0.0.189:3001` is `healthy` in the target group, which
+  proves ALB → app works through the security groups,
+- the ALB's scheme is `internal`,
+- CloudWatch shows `prisma migrate deploy` applying
+  `20260901194204_init` to RDS, and the app logs are JSON
+  (`NODE_ENV=production`),
+- a one-off seed task exited 0: 20 accounts, 60 tickets, 1 incident,
+- through ECS Exec, a read-only query using the app's own Prisma client
+  returned `db_user=meridian`, `server_ip=10.0.10.57` (private subnet),
+  Postgres 16.13, `ssl=true`, and counts matching the seed. This pays
+  off the DB connection test owed since Session 2.
+
+Not yet verified: a real HTTPS MCP request from outside AWS. That comes
+in 3b, with CloudFront.
+
+**Process note.** Verification went beyond read-only calls this time:
+the seed task (`run-task`) and the cleanup of the bad image push
+(`batch-delete-image`) both changed things in AWS. Both were one-off
+operations, not resources, so Terraform's view of the stack isn't
+affected.
+
+**Torn down** from a saved `plan -destroy`: 45 resources, including the
+ECR repository with its image. Afterwards I checked that state was
+empty and that no ECS clusters, load balancers, target groups, RDS
+instances or manual snapshots, ECR repositories, secrets (including any
+scheduled for deletion), non-default VPCs, unattached network
+interfaces, app log groups, `meridian-poc` IAM roles or Elastic IPs
+were left.

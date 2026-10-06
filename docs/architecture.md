@@ -11,12 +11,15 @@ what I actually got billed.
 
 ```
                   Internet
-                     │
-             ┌───────▼────────┐   public subnets (2 AZs)
-             │ Application    │   SG: 80/443 from anywhere
-             │ Load Balancer  │
+                     │ HTTPS (*.cloudfront.net)
+             ┌───────▼────────┐
+             │ CloudFront     │   Session 3b, decision 7
              └───────┬────────┘
-                     │ container port, ALB SG only
+                     │ VPC origin: stays on AWS's network
+             ┌───────▼────────┐   private subnets (2 AZs)
+             │ Internal ALB   │   no public address
+             └───────┬────────┘
+                     │ 3001, ALB SG only
              ┌───────▼────────┐   public subnets (2 AZs)
              │ ECS Fargate    │   public IP for outbound only;
              │ task (MCP)     │   SG blocks all inbound except the ALB
@@ -34,6 +37,7 @@ what I actually got billed.
 | Public subnets | `10.0.0.0/24` (us-east-2a), `10.0.1.0/24` (us-east-2b) |
 | Private subnets | `10.0.10.0/24` (us-east-2a), `10.0.11.0/24` (us-east-2b) |
 | NAT Gateway | None |
+| Task size | 0.25 vCPU / 0.5 GB, ARM64 (Graviton) |
 
 ## 1. Compute: ECS Fargate + ALB, not App Runner
 
@@ -168,6 +172,87 @@ Each secret is its own Secrets Manager resource with
 `recovery_window_in_days = 0`. The default 7–30 day window would reserve
 the names after every `destroy` and break the next `apply`.
 
+## 7. HTTPS through CloudFront with a VPC origin, not a custom domain
+
+An ALB's default DNS name can't get a TLS certificate, and this service
+authenticates with an API key in a request header, so it can't run over
+plain HTTP. I looked at three options:
+
+- **A. CloudFront with a VPC origin pointing at an internal ALB.**
+  CloudFront's default `*.cloudfront.net` domain comes with HTTPS. A VPC
+  origin lets CloudFront reach an ALB in the private subnets over AWS's
+  own network, so the ALB has no public address at all.
+- **B. CloudFront in front of a public ALB.** The ALB would accept only
+  CloudFront's managed prefix list plus a secret origin header. But the
+  hop from CloudFront to the ALB is still plain HTTP over the internet,
+  carrying the API key.
+- **C. A domain I own plus a free ACM certificate on the ALB.** This is
+  the most standard production setup.
+
+**I chose A.** This is a POC, so I'm not buying a domain for it, and
+that's why C is out. A also beats B: the API key is never sent in plain
+text over the internet, and an internal ALB drops two public IPv4
+addresses (about $0.01/hr). The ALB's security group changes from
+"80/443 from anywhere" to "from CloudFront's VPC origin only."
+
+If this were a real production service with a domain already in place,
+I'd use C, with CloudFront added only if caching or edge features were
+needed.
+
+Before choosing A, I checked it against the free plan. CloudFront is on
+the supported list, and only Lambda@Edge is excluded. The free plan's
+service control policy allows all `cloudfront:*` actions, so VPC
+origins are included. It also allows `ssm:*` and `ssmmessages:*`,
+which ECS Exec needs. If a real apply still gets refused, B is the
+fallback.
+
+One related gotcha: as the project nears its spend limit, AWS applies
+another policy. That one denies `cloudfront:CreateDistribution`,
+`ecs:CreateService` and `elasticloadbalancing:CreateLoadBalancer`. If
+this stack's apply suddenly fails with Access Denied, check spend in
+AWS Settings > Billing before debugging IAM.
+
+## 8. ARM64 (Graviton) tasks
+
+The image is built on an Apple Silicon Mac, so it comes out `linux/arm64`
+by default. Fargate defaults to x86, which would fail at start with
+`exec format error`. Rather than cross-building for x86 under emulation,
+the task definition sets `cpu_architecture = "ARM64"`. Graviton Fargate
+is also about 20% cheaper, and it matches the `db.t4g` RDS instance.
+
+Images are built with `--provenance=false --sbom=false`. Docker
+Desktop's defaults otherwise push an OCI image index (the image plus an
+attestation manifest) instead of a single image. ECR's basic scan doesn't
+scan an index, and the "expire untagged" lifecycle rule would target
+the untagged image underneath the tag.
+
+## 9. ECR is bootstrapped first, with `-target`
+
+The ECS service can't start without an image, and the image can't be
+pushed until the repository exists. So every bring-up applies the ECR
+repository on its own first (`-target`), pushes the image, then applies
+everything else. The tag is a required `image_tag` variable (the app
+repo's git short SHA, never `latest`), and tags are immutable.
+Targeting is normally discouraged. Here it's a documented, one-step
+bootstrap, and Session 4's pipeline takes over the push.
+
+The repository has `force_delete = true`, so `destroy` removes it even
+with images inside. Re-pushing about 300 MB at each bring-up is cheaper
+and simpler than keeping a registry alive outside the stack.
+
+## 10. Scoped IAM instead of AWS-managed task policies
+
+Each task has two roles. The execution role is used by ECS to pull the
+image, inject secrets and create the log stream. The task role is used
+by the app's own process. The execution role has an inline policy
+scoped to this repository, this log group and the three secret ARNs,
+rather than `AmazonECSTaskExecutionRolePolicy`, which allows pulling from
+every repository and writing to every log group. The app calls no AWS
+APIs, so the task role carries only the four `ssmmessages` actions
+needed for ECS Exec. Both trust policies require `aws:SourceAccount` and
+an `aws:SourceArn` in this account and Region (confused-deputy
+protection).
+
 ## AWS account constraints
 
 - A new-experience project on the free plan, locked to `us-east-2`.
@@ -178,12 +263,3 @@ the names after every `destroy` and break the next `apply`.
 - The free plan's spend cap is a safety net, not a substitute for the
   Budget alarm in Session 5. The alarm tells me when spend is climbing.
   The cap only stops things once it's too late to fix calmly.
-
-## Open questions
-
-- **HTTPS (Session 3).** An ALB's default DNS name can't get a TLS
-  certificate, and this service authenticates with an API key in a
-  header, so it shouldn't run over plain HTTP. The options are a domain
-  I own plus a free ACM certificate, or CloudFront in front of the ALB
-  (CloudFront's default domain comes with HTTPS). I'll decide in
-  Session 3.
