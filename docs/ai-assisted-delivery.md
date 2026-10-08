@@ -290,3 +290,79 @@ instances or manual snapshots, ECR repositories, secrets (including any
 scheduled for deletion), non-default VPCs, unattached network
 interfaces, app log groups, `meridian-poc` IAM roles or Elastic IPs
 were left.
+
+### 2026-10-08: Session 3b, CloudFront in front of the ALB (blocked)
+
+**Design.** Claude read the CloudFront VPC origin docs and the app's
+`src/server.ts` before proposing anything, and the app code changed my
+plan: the `x-api-key` check is inside each tool handler, so a missing or
+wrong key is HTTP 200 with `isError: true`, not a 401, and `tools/list`
+needs no key. The negative checks were rewritten to match. I approved
+two decisions: the ALB admits only the VPC origin's AWS-managed security
+group (not CloudFront's managed prefix list, which would admit any
+distribution), and a new `modules/edge` owns that ingress rule, to avoid
+a network → compute → network dependency cycle.
+
+**Built.** `modules/edge` (VPC origin, security group lookup, ingress
+rule, distribution), removal of the 80/443-from-anywhere ALB rules from
+`modules/network`, wiring and a `cloudfront_url` output in `envs/poc`.
+`terraform validate` and `fmt` passed.
+
+**Models.** Opus 5.5 did the design walkthrough and wrote the modules.
+I then switched to Sonnet 5.5 (per the model-usage rules) for bring-up,
+the image-push debugging, plan review and the destroy. Claude
+recommended switching back to Opus for a review before `terraform
+destroy`; I chose to go ahead on Sonnet. The destroy plan was reviewed
+(45 resources, all this project's) and the stack holds only seed data.
+
+**Verified for real, and what was not:**
+
+- full plan: 44 to add, 0 to change, 0 to destroy; reviewed the ALB
+  ingress rule (SG reference, no CIDR), the distribution settings and
+  the VPC origin config before applying,
+- 43 of 44 resources applied, including the VPC origin (8m14s), the
+  security group lookup (one match) and the ingress rule, and the ECS
+  service came up healthy,
+- `CreateDistribution` failed with 403 "Your account must be verified
+  before you can add new CloudFront resources" (RequestID
+  `6b8ffae6-3974-4fc8-aa41-22c6e8a88351`); `get-account-plan-state`
+  showed FREE/ACTIVE with $119.88 credits left, so it isn't the spend
+  limit.
+
+Not verified: the CloudFront URL, an MCP tool call through it, and all
+the negative checks. Session 3b is not done.
+
+**What went wrong, and what was caught:**
+
+- My pre-check covered the supported-services list and the service
+  control policy but not account verification, which is a separate gate.
+  Claude's plan flagged the Access Denied risk but attributed it to the
+  spend-limit policy.
+- `docker push` timed out ("timeout awaiting response headers") on
+  large layers of the 554MB `npm install` image, on a different layer
+  each run, including from my own terminal. `docker buildx build
+  --output type=image,...,push=true` succeeded in 6m52s. That points at
+  Docker Desktop's containerd pusher, though I didn't isolate it from a
+  slow upload link. The image is that large because `npm install`
+  includes dev dependencies, which joins the app-repo follow-ups.
+- Claude's first build command mis-tagged the image (`$REPO:e5cbf50` is
+  a zsh modifier), which showed up as a failed push to a repo that did
+  exist. Fixed with `${REPO}:${SHA}` and the bad local tag removed.
+
+**Support.** I opened an AWS Support case with the error and RequestID
+and am waiting on it. Option B would hit the same block; option C
+(domain + ACM, no CloudFront) is the only alternative and decision 7
+ruled it out for a POC.
+
+**Torn down** from a saved `plan -destroy`: 45 resources, including the
+ECR repository and image, so the next bring-up needs the image pushed
+again. The VPC origin took 7m8s to delete. Afterwards I checked that
+state was empty and that no RDS instances or manual snapshots, load
+balancers or target groups, ECS clusters, ECR repositories, secrets
+(including any scheduled for deletion), non-default VPCs or security
+groups (so AWS's managed `CloudFront-VPCOrigins-Service-SG` was cleaned
+up with the origin and didn't block the VPC delete), network interfaces,
+Elastic IPs or app log groups were left. Doing this check, my first
+attempt used a zsh variable for the CLI flags, which didn't word-split
+and made every command error; I caught it because the outputs were
+empty, not zero, and reran it.

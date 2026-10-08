@@ -212,6 +212,32 @@ another policy. That one denies `cloudfront:CreateDistribution`,
 this stack's apply suddenly fails with Access Denied, check spend in
 AWS Settings > Billing before debugging IAM.
 
+**Addendum, 2026-10-08 (Session 3b).** Built as designed, and the
+riskiest parts worked: the VPC origin deployed, AWS's
+`CloudFront-VPCOrigins-Service-SG` was found by name (exactly one match
+in the VPC), and the ALB's only ingress rule references it, so the old
+80/443-from-anywhere rules are gone. That rule lives in `modules/edge`,
+not `modules/network`, because it needs the security group AWS creates
+with the VPC origin, and the origin needs the ALB from `compute`, which
+needs `network`: keeping it in `network` would be a cycle.
+
+What my pre-check missed: the distribution was refused with "Your
+account must be verified before you can add new CloudFront resources".
+I had checked the supported-services list and the service control
+policy, but account verification is a separate gate, and the free plan
+being active with credits left doesn't imply it. It is not the
+spend-limit policy described above. Option B would hit the same block
+since it also needs a distribution, so the only way around CloudFront is
+option C. I opened a Support case rather than change the design.
+
+Settings chosen for the distribution: `https-only` for viewers (a
+redirect would only answer after the client had already sent its key in
+the clear), caching disabled, all methods allowed (MCP is POST), and
+the managed `AllViewerExceptHostHeader` origin request policy so
+`x-api-key` reaches the app. The default `*.cloudfront.net` certificate
+can't have its minimum TLS version raised; that needs a custom
+certificate, i.e. a domain.
+
 ## 8. ARM64 (Graviton) tasks
 
 The image is built on an Apple Silicon Mac, so it comes out `linux/arm64`

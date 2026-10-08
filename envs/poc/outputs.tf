@@ -44,3 +44,8 @@ output "alb_dns_name" {
   description = "Internal ALB; resolves to private IPs only."
   value       = module.compute.alb_dns_name
 }
+
+output "cloudfront_url" {
+  description = "Public HTTPS endpoint; POST /mcp with an x-api-key header."
+  value       = module.edge.cloudfront_url
+}

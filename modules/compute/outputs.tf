@@ -21,6 +21,11 @@ output "alb_arn" {
   value       = aws_lb.app.arn
 }
 
+output "alb_listener_port" {
+  description = "For the CloudFront VPC origin and the ALB's ingress rule."
+  value       = aws_lb_listener.http.port
+}
+
 output "alb_dns_name" {
   description = "Internal DNS name; resolves only to private IPs."
   value       = aws_lb.app.dns_name
