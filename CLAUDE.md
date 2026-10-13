@@ -183,9 +183,9 @@ build-focused (what was built, decided, verified, caught and torn down).
 
 ## Current build status
 
-Session 3a complete (2026-10-05). Session 3b built but **blocked
-(2026-10-08)** on AWS account verification for CloudFront. Infrastructure
-destroyed.
+Session 3a complete (2026-10-05). Session 3b built but **still blocked
+(retried 2026-10-13)** on AWS account verification for CloudFront.
+Infrastructure destroyed.
 
 - Session 1: `docs/architecture.md` (decisions 1–5) and `modules/network`
   (VPC `10.0.0.0/16`, 2 public + 2 private subnets in us-east-2a/b, IGW,
@@ -260,9 +260,24 @@ repo's git short SHA).
     a distribution); the only way around is option C (domain + ACM).
   - **Not verified yet:** the `*.cloudfront.net` URL, a real MCP tool
     call, and every negative check.
-  - **Next session:** if Support has verified the account, re-run the
-    bring-up runbook and then the checks below. If not, decide whether
-    to wait or go with option C.
+  - **Retried 2026-10-13:** Support case 179148119900306 was resolved
+    ("verification successful", 10:31 UTC), but `CreateDistribution`
+    still returned the same 403 afterwards (RequestIDs
+    `044506f2-e583-4dcf-a60c-410a75a93512`,
+    `cf36ba35-4ed6-44b7-abec-b02d9e1901b6`). New case opened citing the
+    first. Everything else applied again; stack destroyed.
+  - **Fixed 2026-10-13:** the ECS service could start a task before the
+    `database-url` secret had a value (first task failed, service
+    tainted). `secret_arns` in `modules/secrets/outputs.tf` now
+    `depends_on` the secret versions. Validated, not reproduced. If a
+    service ever shows as tainted but healthy, `terraform untaint` it.
+  - **Next session:** wait for the new case. Before a full bring-up, a
+    cheap probe is a throwaway distribution made with the CLI
+    (`aws cloudfront create-distribution` against a dummy custom
+    origin; a 403 returns in seconds, delete it if it succeeds), so
+    there's no need to stand up the stack to find out. If still blocked, decide
+    between waiting and option C. After a successful apply, run the
+    checks below.
 
 ## Next steps
 

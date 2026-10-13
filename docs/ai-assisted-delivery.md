@@ -366,3 +366,53 @@ Elastic IPs or app log groups were left. Doing this check, my first
 attempt used a zsh variable for the CLI flags, which didn't word-split
 and made every command error; I caught it because the outputs were
 empty, not zero, and reran it.
+
+### 2026-10-13: Session 3b retry, still blocked, plus a secrets race
+
+**Retry.** AWS Support replied at 10:31 UTC that the account was
+verified for CloudFront. I re-ran the bring-up runbook from an empty
+state: ECR only, the ARM64 image from the app repo's `main` (`200056b`,
+docs-only change since `e5cbf50`, pushed with `buildx` in ~8 minutes),
+then the full plan (44 to add, 0 to change, 0 to destroy) and apply.
+
+**Models.** Opus 5.5 read CLAUDE.md and planned the session. Claude
+recommended Sonnet for the rest, since it was a runbook re-run on
+reviewed code; I switched and stayed on Sonnet through the destroy.
+
+**Verified for real, and what was not:**
+
+- VPC origin (8m12s), security group lookup and ALB ingress rule
+  applied again,
+- the ECS service reached steady state with the target registered;
+  the app logs showed `prisma migrate deploy` applying the migration
+  and the server listening on 3001,
+- `CreateDistribution` returned the same 403 three times, twice after
+  Support's message (RequestIDs `044506f2-e583-4dcf-a60c-410a75a93512`
+  and `cf36ba35-4ed6-44b7-abec-b02d9e1901b6`). Verification has not
+  taken effect for this account. I opened a new case that cites the
+  first one.
+
+Not verified: the CloudFront URL, an MCP tool call, the negative
+checks. Session 3b is still not done. I skipped the seed task and the
+partial negative checks and destroyed (45 resources, all this project's;
+a read-back found no RDS, ALB, VPC, VPC origin or secrets left).
+
+**What went wrong, and what was caught:**
+
+- The first apply failed twice over. Besides the CloudFront 403, the
+  ECS service errored with "No rollback candidate" because its first
+  task started before the `database-url` secret had a value
+  (`can't find the specified secret value for staging label:
+  AWSCURRENT`). ECS retried and the second task was healthy, but
+  Terraform had already marked the service failed and tainted it. This
+  ordering gap existed in 3a and didn't surface there, so it was luck,
+  not design. Fix: `secret_arns` in `modules/secrets/outputs.tf` now
+  `depends_on` the secret versions, so the compute module waits for the
+  values. I could not reproduce the race on demand, so the fix is
+  validated but not proven.
+- I untainted the healthy service so the next plan was one resource
+  (the distribution) instead of destroying and recreating the service.
+- The first pair of diagnostic commands failed on my shell, not on AWS:
+  a `$P` variable holding `--profile ... --region ...` isn't split in
+  zsh, and I used the wrong log group name (`/ecs/meridian-poc/mcp-server`,
+  not `meridian-poc/app`).
