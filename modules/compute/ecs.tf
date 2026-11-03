@@ -108,6 +108,13 @@ resource "aws_ecs_service" "app" {
   # `apply` only finishes once the task is running and healthy.
   wait_for_steady_state = true
 
+  # The app repo's pipeline registers new task-definition revisions and
+  # points the service at them (decision 11). Without this, the next apply
+  # would roll the service back to the revision Terraform created.
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
+
   # The target group must be attached to the ALB before a service uses it.
   depends_on = [aws_lb_listener.http]
 }

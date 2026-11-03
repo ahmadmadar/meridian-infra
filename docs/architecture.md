@@ -279,13 +279,104 @@ needed for ECS Exec. Both trust policies require `aws:SourceAccount` and
 an `aws:SourceArn` in this account and Region (confused-deputy
 protection).
 
+## 11. CI deploys with a session-scoped IAM user key, not GitHub OIDC
+
+Session 4's pipeline (in the app repo) has to push to ECR and update the
+ECS service. The usual keyless way is GitHub OIDC: an IAM OIDC identity
+provider plus a role the workflow assumes with a short-lived token. I
+looked at three options:
+
+- **A. An IAM user with a scoped deploy policy, and an access key that
+  exists only while the stack is up.**
+- **B. AWS-native CI** (CodePipeline, CodeBuild, CodeConnections), which
+  is keyless because AWS runs the pipeline itself.
+- **C. Activate advanced features**, which removes the SCP restriction
+  below.
+
+**I chose A.** OIDC isn't possible here: the free plan's service control
+policy denies `iam:*Provider*`. I confirmed it against the live project,
+where even the read-only `ListOpenIDConnectProviders` returns an
+explicit deny, so `CreateOpenIDConnectProvider` would fail too. `terraform plan` can't
+see an SCP, so this would only have shown up at apply. C is the same
+irreversible trade I already declined for App Runner (decision 1): it
+removes the spend cap. B is fully keyless but isn't GitHub Actions, adds
+a console handshake for the connection on every bring-up, and is a much
+bigger session. A keeps the pipeline on GitHub Actions and the exposure
+small.
+
+How the exposure is kept small:
+
+- **The key only exists while the stack does.** Terraform creates the
+  user `meridian-poc-github-deploy` (path `/ci/`) and its policy, but
+  not the key: `aws_iam_access_key` would write the secret into state,
+  which decision 6 rules out. I create the key with the CLI at bring-up
+  and put it in GitHub, and I delete it with the CLI before
+  `terraform destroy`. The user can't use `force_destroy` (see below), so
+  if I forget, the destroy fails safely at the end with `DeleteConflict`
+  and I re-run it after deleting the key.
+- **Only approved jobs can read it.** The key is an environment secret
+  on the app repo's `poc` environment, which requires my approval.
+  Jobs for pull requests, forks and other branches never receive it.
+- **The policy is narrow.** Push and scan-read on the one ECR repository,
+  `UpdateService` and `DescribeServices` on the one service, and
+  `iam:PassRole` for only the two task roles with
+  `iam:PassedToService = ecs-tasks.amazonaws.com`. The actions that
+  can't be scoped (`ecr:GetAuthorizationToken`, and `Describe` and
+  `RegisterTaskDefinition`) are the only `*` resources. There is no
+  Terraform, IAM or Secrets Manager access, and no console login.
+
+This is a real exception to "no long-lived keys" (see the account
+constraints below), not an oversight. If the account ever has advanced
+features activated, I'd replace the user with an OIDC role and drop the
+manual key step.
+
+The policy's ARNs are built from `name_prefix` rather than referenced
+from `modules/compute`. The ECR bootstrap (decision 9) uses `-target`,
+and a reference to the ECS service would pull the whole stack into that
+apply. The cost is that the naming convention lives in two places;
+`modules/ci/main.tf` lists the files that must stay in sync.
+
+**No `force_destroy` on the user.** I first set `force_destroy = true`
+so that destroy would delete the hand-made key. On the first teardown
+it deleted the key and the policy, then failed on the user: the provider
+also calls `iam:DeleteLoginProfile`, even for a user with no console
+password, and the free-plan SCP denies `iam:*LoginProfile*` (the same
+statement that denies OIDC). With `force_destroy = false` the provider
+calls only `DeleteUser`, which I confirmed on the account by destroying
+the leftover user that way. I chose a manual key deletion over a
+destroy-time `local-exec` provisioner: it mirrors the manual key
+creation, and a provisioner would hard-code the CLI profile in the
+module and make destroy depend on the CLI.
+
+**CI owns the running task definition.** After a deploy the service points
+at a revision Terraform didn't create. `aws_ecs_service` therefore has
+`ignore_changes = [task_definition]`; otherwise the next `apply` would
+roll the service back. The consequence: `image_tag` only sets the first
+image at bring-up. The pipeline starts from the latest revision in the
+task family, so a config change made in Terraform is carried into the
+next deploy rather than lost, but it doesn't reach the running service
+until then. Pipeline revisions aren't in state, so destroy leaves them
+ACTIVE; the teardown deregisters them (they cost nothing, but nothing
+should be left behind).
+
+One gate, not two. The key is only available inside the `poc`
+environment, so every job that touches AWS has to run there. GitHub asks
+for approval once per job that references an environment with required
+reviewers, so a separate build job and deploy job would need two
+approvals, with the first one before the build. Build, scan and deploy
+are therefore a single `release` job: tests run first without any AWS
+access, then one approval, then the whole release. Two environments with
+two users would put the gate only on the deploy, but doubles the IAM to
+review for the sake of an ECR push that is harmless on its own.
+
 ## AWS account constraints
 
 - A new-experience project on the free plan, locked to `us-east-2`.
   Resources can't be created in any other Region.
 - The CLI signs in with `aws login` (browser sign-in, 12-hour sessions)
-  under the profile `meridian`. There are no long-lived access keys
-  anywhere.
+  under the profile `meridian`. The one exception to "no long-lived
+  access keys" is the CI deploy user's key (decision 11), which exists
+  only while the stack is up.
 - The free plan's spend cap is a safety net, not a substitute for the
   Budget alarm in Session 5. The alarm tells me when spend is climbing.
   The cap only stops things once it's too late to fix calmly.

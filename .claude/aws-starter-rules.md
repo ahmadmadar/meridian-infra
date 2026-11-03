@@ -72,3 +72,5 @@ Constraints for each level:
 - MUST suggest alternatives when a better approach exists
 - MUST flag best practices and explain trade-offs
 - MUST still execute the user's choice if they disagree with a suggestion
+
+**Saved help_level for this user: HIGH** (chosen 2026-11-03).

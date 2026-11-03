@@ -104,3 +104,9 @@ module "edge" {
   alb_dns_name          = module.compute.alb_dns_name
   alb_listener_port     = module.compute.alb_listener_port
 }
+
+module "ci" {
+  source = "../../modules/ci"
+
+  name_prefix = local.name_prefix
+}
