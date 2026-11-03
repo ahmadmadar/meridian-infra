@@ -43,6 +43,7 @@ meridian-infra/
 │ ├── database/ # RDS + subnet group
 │ ├── secrets/ # Secrets Manager
 │ ├── compute/ # ECR + ECS cluster/service (Fargate) + ALB
+│ ├── edge/ # CloudFront + VPC origin, ALB ingress from CloudFront
 │ └── observability/ # CloudWatch log groups, alarms, budget alarm
 ├── docs/
 │ ├── architecture.md
@@ -124,6 +125,36 @@ Mirrors the other two repos' discipline, adapted for infra work:
    stay live for a demo.
 8. Commit via GitHub Desktop.
 
+## Model usage
+
+Default model is Sonnet. Opus is reserved for specific moments, mainly
+to keep cost down and because `terraform plan` review catches most
+mistakes before anything is created.
+
+Claude Code can't switch models itself. The user switches with `/model`.
+So when a task falls into the Opus category below, say so and recommend
+the switch before starting, instead of continuing on Sonnet or assuming
+the switch has happened. Also say when it's fine to switch back.
+
+**Stay on Sonnet for:**
+- Writing and editing Terraform modules
+- The GitHub Actions pipeline
+- Explain-before-you-build walkthroughs (learning mode)
+- Docs, the decisions log and cost notes
+
+**Recommend Opus for:**
+- Session-start design decisions that set the shape of something
+  (VPC Connector and security group layout, RDS access path)
+- IAM and networking debugging, where several pieces interact
+- A review pass before anything hard to undo: `terraform destroy`,
+  changes to a live database, or changes to secrets
+- Any issue that has failed two fix attempts on Sonnet
+
+**Logging:** note in `docs/ai-assisted-delivery.md` which model handled
+what, and why any switch happened (for example, "switched to Opus to
+debug the VPC Connector security group"). Specific entries only, not
+"used both models".
+
 ## Learning mode (first AWS project)
 
 This is a first hands-on AWS project — prior cloud experience is Azure
@@ -152,7 +183,9 @@ build-focused (what was built, decided, verified, caught and torn down).
 
 ## Current build status
 
-Session 3a complete (2026-10-05), infrastructure destroyed.
+Session 3 complete: 3a on 2026-10-05, 3b verified end to end on
+2026-11-02 after the CloudFront account block cleared. Infrastructure
+destroyed. Next is Session 4.
 
 - Session 1: `docs/architecture.md` (decisions 1–5) and `modules/network`
   (VPC `10.0.0.0/16`, 2 public + 2 private subnets in us-east-2a/b, IGW,
@@ -173,14 +206,14 @@ Session 3a complete (2026-10-05), infrastructure destroyed.
     one-off seed task wrote 20 accounts / 60 tickets / 1 incident, and
     an ECS Exec read-back over SSL. Session 2's owed DB test is paid.
   - The ALB is internal and has no listener reachable from outside the
-    VPC. It's only reachable publicly once 3b adds CloudFront. The ALB
-    SG still has the Session 1 80/443-from-anywhere rules; 3b replaces
-    them with the CloudFront VPC origin's SG.
+    VPC. It's only reachable publicly once 3b adds CloudFront.
   - **App repo follow-ups** (meridian-fde-enterprise-demo): ECR basic
     scan of `e5cbf50` found 7 critical / 33 high, all Debian OS packages
     in `node:20-slim` (Node 20 is EOL since 2026-04). Move to a current
     Node LTS slim base, and install `openssl` (Prisma warns it can't
-    detect it). Natural fit for Session 4's CI work.
+    detect it; still warning on the 2026-11-02 run, seed included).
+    Also drop dev dependencies from the image. Natural fit for
+    Session 4's CI work.
 
 ### Bring-up runbook
 
@@ -193,12 +226,20 @@ repo's git short SHA).
    review, `terraform -chdir=envs/poc apply tfplan`.
 2. Push the image from the app repo's `main` (tags are immutable):
    `aws ecr get-login-password --profile meridian --region us-east-2 | docker login --username AWS --password-stdin <account>.dkr.ecr.us-east-2.amazonaws.com`,
-   then `docker build --platform linux/arm64 --provenance=false --sbom=false -t <repo_url>:<sha> .`
-   and `docker push <repo_url>:<sha>`. Without the two flags Docker
-   Desktop pushes an image index the scan and lifecycle rule mishandle.
+   then `docker buildx build --platform linux/arm64 --provenance=false --sbom=false --output "type=image,name=<repo_url>:<sha>,push=true" .`
+   Without the two flags Docker Desktop pushes an image index the scan
+   and lifecycle rule mishandle. Use `buildx` rather than `docker push`:
+   on Docker Desktop's containerd image store `docker push` timed out
+   ("timeout awaiting response headers") on the large layers, on
+   different layers each run; the `buildx` push succeeded in ~7 minutes
+   (~299MB compressed). In zsh write `"${REPO}:${SHA}"`, because
+   `$REPO:e...` is read as a modifier and silently mis-tags the image.
+   To build a specific older commit without touching the app repo's
+   checkout, `git archive <sha> | tar -x -C <dir>` and build from there.
 3. Everything else: `terraform -chdir=envs/poc plan -out=tfplan`,
-   review, apply. ~10 minutes (RDS); the apply waits for the service to
-   be healthy.
+   review, apply. Expect 25-30 minutes with CloudFront: RDS ~10, the
+   VPC origin ~8 (and about as long to delete), and the distribution
+   a few more. The apply waits for the service to be healthy.
 4. Seed (fresh DB each bring-up): `aws ecs run-task` with the
    `task_definition` output, the public subnets, the app SG,
    `assignPublicIp=ENABLED`, and a container override command
@@ -207,6 +248,37 @@ repo's git short SHA).
    (`brew install --cask session-manager-plugin`):
    `aws ecs execute-command --cluster meridian-poc --task <id> --container mcp-server --interactive --command "sh"`.
 
+- Session 3b (branch `session-3b-cloudfront`, built 2026-10-08,
+  verified 2026-11-02): `modules/edge` (CloudFront VPC origin +
+  distribution; owns the ALB's only ingress rule, from the VPC origin's
+  AWS-managed security group, looked up by name) and the Session 1
+  80/443-from-anywhere ALB rules removed from `modules/network`.
+  Decision 7 addendum.
+  - **Account block history:** `CreateDistribution` returned 403 "Your
+    account must be verified..." on 2026-10-08 and 2026-10-13 (even
+    after Support case 179148119900306 was marked resolved). Cleared by
+    2026-11-02, confirmed first with a disabled throwaway distribution
+    made with the CLI (created, then deleted). That probe is the cheap
+    way to test any future CloudFront account issue without a bring-up.
+  - **Verified 2026-11-02** through `https://<id>.cloudfront.net`
+    (image `e5cbf50`): `/health` 200; `tools/list` with no key lists
+    all 8 tools; `tools/call list_active_incidents` with the agent key
+    returns the seeded incident (CloudFront → VPC origin → internal ALB
+    → Fargate → RDS). Negative checks: no key and wrong key on
+    `tools/call` return HTTP 200 with `isError: true` / `UNAUTHORIZED`
+    (the app has no 401, by design); plain `http://` gets 403 from
+    CloudFront; the ALB name resolves only to `10.0.x.x` and times out
+    from outside; the task's public IP on 3001 times out.
+  - **Secrets race fix proven:** `secret_arns` in
+    `modules/secrets/outputs.tf` `depends_on` the secret versions
+    (added 2026-10-13 after a first task started before `database-url`
+    had a value and the service got tainted). On the 2026-11-02 fresh
+    apply the first task came up healthy and nothing was tainted. If a
+    service ever shows as tainted but healthy, `terraform untaint` it.
+  - **Known limit:** with the default `*.cloudfront.net` certificate the
+    viewer TLS minimum is fixed at `TLSv1`; raising it needs option C
+    (domain + ACM), which decision 7 ruled out for the POC.
+
 ## Next steps
 
 1. ~~Session 1: Terraform foundations + decisions doc.~~ Done.
@@ -214,10 +286,9 @@ repo's git short SHA).
 3. Session 3, split in two (decided 2026-10-05):
    - ~~**3a:** ECR, ECS on Fargate (ARM64), IAM roles, internal ALB,
      log group, verified from inside the VPC.~~ Done 2026-10-05.
-   - **3b:** CloudFront with a VPC origin in front of the internal ALB
-     for HTTPS (decision 7: no domain purchase for a POC). Verify a
-     real MCP tool call end to end, plus the negative checks (no key →
-     401, ALB and task IP unreachable from the internet).
+   - ~~**3b:** CloudFront with a VPC origin in front of the internal
+     ALB for HTTPS, verified with a real MCP tool call end to end plus
+     the negative checks.~~ Done 2026-11-02.
 4. Session 4: GitHub Actions — test → build → push to ECR → deploy,
    with a manual approval gate.
 5. Session 5: CloudWatch logs/alarms + the Budget alarm.

@@ -92,3 +92,15 @@ module "compute" {
   log_group_arn  = module.observability.app_log_group_arn
   log_group_name = module.observability.app_log_group_name
 }
+
+module "edge" {
+  source = "../../modules/edge"
+
+  name_prefix = local.name_prefix
+
+  vpc_id                = module.network.vpc_id
+  alb_security_group_id = module.network.alb_security_group_id
+  alb_arn               = module.compute.alb_arn
+  alb_dns_name          = module.compute.alb_dns_name
+  alb_listener_port     = module.compute.alb_listener_port
+}

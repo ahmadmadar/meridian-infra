@@ -104,7 +104,7 @@ resource "aws_default_security_group" "default" {
 
 resource "aws_security_group" "alb" {
   name        = "${var.name_prefix}-alb"
-  description = "Public entry point: HTTP/HTTPS from anywhere, forwards only to the app"
+  description = "Internal ALB: inbound only from the CloudFront VPC origin, forwards only to the app"
   vpc_id      = aws_vpc.main.id
 
   tags = { Name = "${var.name_prefix}-alb" }
@@ -128,23 +128,11 @@ resource "aws_security_group" "db" {
 
 # --- ALB ---
 
-resource "aws_vpc_security_group_ingress_rule" "alb_http" {
-  security_group_id = aws_security_group.alb.id
-  description       = "HTTP from the internet"
-  cidr_ipv4         = "0.0.0.0/0"
-  ip_protocol       = "tcp"
-  from_port         = 80
-  to_port           = 80
-}
-
-resource "aws_vpc_security_group_ingress_rule" "alb_https" {
-  security_group_id = aws_security_group.alb.id
-  description       = "HTTPS from the internet"
-  cidr_ipv4         = "0.0.0.0/0"
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-}
+# No ingress rule here. The only way in is from CloudFront's VPC origin,
+# and that rule lives in modules/edge: it references a security group
+# AWS creates with the VPC origin, which needs the ALB from compute, so
+# defining it here would make network depend on compute (a cycle).
+# See docs/architecture.md, decision 7.
 
 resource "aws_vpc_security_group_egress_rule" "alb_to_app" {
   security_group_id            = aws_security_group.alb.id
