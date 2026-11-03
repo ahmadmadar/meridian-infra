@@ -58,6 +58,11 @@ against the real resources with read-only AWS CLI calls, then destroy.
       runbook in CLAUDE.md
 - [x] Verification from inside the VPC: a one-off seed task and an ECS
       Exec query through the app's own Prisma client
+- [x] `modules/edge/`: CloudFront VPC origin, distribution and the ALB's
+      only ingress rule
+- [x] A CLI probe for the CloudFront account block (a disabled
+      throwaway distribution, deleted after it was created), and the
+      end-to-end and negative checks through the CloudFront URL
 
 ## What required architectural decisions
 
@@ -416,3 +421,74 @@ a read-back found no RDS, ALB, VPC, VPC origin or secrets left).
   a `$P` variable holding `--profile ... --region ...` isn't split in
   zsh, and I used the wrong log group name (`/ecs/meridian-poc/mcp-server`,
   not `meridian-poc/app`).
+
+### 2026-11-02: Session 3b done, CloudFront unblocked and verified
+
+**Probe first.** AWS Support told me CloudFront was unblocked. Since a
+"resolved" case had still left me blocked on 2026-10-13, I didn't
+stand up the stack to find out. Claude created a *disabled* throwaway
+distribution with the CLI against `example.com`. `CreateDistribution`
+succeeded (the same call that had returned 403 twice). Claude waited
+for it to finish deploying, deleted it, and confirmed the account had
+no distributions left. Plan still FREE/ACTIVE, $119.82 credits.
+
+**Bring-up.** Image `e5cbf50`, my choice, so this run differed from
+3a only in the CloudFront change. `main` was at `200056b`, which Claude
+checked is docs-only on top of it. Claude built from a `git archive`
+export of that commit, so the app repo's checkout was untouched. ECR
+first (2 to add), `buildx` push, then the full plan: 44 to add, 0 to
+change, 0 to destroy. Claude reviewed the plan for RDS
+`publicly_accessible = false` and encryption, `internal = true` on the
+ALB, `https-only` viewers, and SG references on every ingress rule (the
+only `0.0.0.0/0` is the app's outbound 443). I approved the bring-up
+at the step level rather than reading each plan myself. Apply times:
+RDS 8m32s, VPC origin 8m11s, distribution 2m43s. The seed task wrote
+20 accounts, 60 tickets and 1 incident.
+
+**Models.** Opus 5.5 ran the whole session. The runbook re-run and
+checks are Sonnet work under the model rules, and Claude only flagged
+this at the start, not when the bring-up began; I stayed on Opus. The
+pre-destroy review is Opus work under the same rules.
+
+**Verified for real**, through `https://d1g7kfmcvp4vw.cloudfront.net`:
+
+- `/health` returned 200,
+- `tools/list` with no key listed all 8 tools,
+- `tools/call list_active_incidents` with the agent key (read from
+  Secrets Manager into a shell variable, never printed) returned the
+  seeded SEV2 incident: CloudFront → VPC origin → internal ALB →
+  Fargate → RDS, end to end,
+- no key and wrong key on `tools/call`: HTTP 200, `isError: true`,
+  `UNAUTHORIZED`, as the app is designed to do,
+- plain `http://` got 403 from CloudFront, no redirect,
+- the ALB name resolved only to `10.0.10.198` / `10.0.11.134` and timed
+  out from my laptop,
+- the task's public IP on 3001 timed out.
+
+Session 3b is done.
+
+**What went wrong, and what was caught:**
+
+- The 2026-10-13 secrets-race fix is now proven: on a fresh apply the
+  first task came up healthy and a follow-up plan showed no changes
+  and nothing tainted.
+- Claude's first probe command failed because `aws` isn't on the
+  shell's PATH (it's in `~/.local/bin`), and the second because its
+  scratch directory didn't exist yet. Nothing was created by either.
+- My `terraform.tfvars` still held `image_tag = "200056b"` from the
+  last retry; Claude caught that before planning and set it to
+  `e5cbf50`.
+- Plan review flagged one known limit, not a regression: with the
+  default `*.cloudfront.net` certificate the viewer TLS minimum is
+  fixed at `TLSv1`. Raising it needs option C (domain + ACM).
+- Prisma's OpenSSL warning is still in the logs, including the seed
+  task. Still an app-repo follow-up.
+
+**Torn down** from a saved `plan -destroy` that Claude reviewed before I
+approved it: 46 resources (the 44 plus the two ECR resources), all in
+this project's modules. Distribution 3m48s, RDS 1m51s, VPC origin
+8m36s. Afterwards state was empty, and a read-back found no RDS
+instances or manual snapshots, load balancers, target groups, ECS
+clusters, ECR repositories, secrets (including scheduled deletions),
+CloudFront distributions or VPC origins, non-default VPCs, Elastic IPs,
+network interfaces or app log groups.

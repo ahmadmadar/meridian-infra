@@ -183,9 +183,9 @@ build-focused (what was built, decided, verified, caught and torn down).
 
 ## Current build status
 
-Session 3a complete (2026-10-05). Session 3b built but **still blocked
-(retried 2026-10-13)** on AWS account verification for CloudFront.
-Infrastructure destroyed.
+Session 3 complete: 3a on 2026-10-05, 3b verified end to end on
+2026-11-02 after the CloudFront account block cleared. Infrastructure
+destroyed. Next is Session 4.
 
 - Session 1: `docs/architecture.md` (decisions 1–5) and `modules/network`
   (VPC `10.0.0.0/16`, 2 public + 2 private subnets in us-east-2a/b, IGW,
@@ -211,7 +211,9 @@ Infrastructure destroyed.
     scan of `e5cbf50` found 7 critical / 33 high, all Debian OS packages
     in `node:20-slim` (Node 20 is EOL since 2026-04). Move to a current
     Node LTS slim base, and install `openssl` (Prisma warns it can't
-    detect it). Natural fit for Session 4's CI work.
+    detect it; still warning on the 2026-11-02 run, seed included).
+    Also drop dev dependencies from the image. Natural fit for
+    Session 4's CI work.
 
 ### Bring-up runbook
 
@@ -232,6 +234,8 @@ repo's git short SHA).
    different layers each run; the `buildx` push succeeded in ~7 minutes
    (~299MB compressed). In zsh write `"${REPO}:${SHA}"`, because
    `$REPO:e...` is read as a modifier and silently mis-tags the image.
+   To build a specific older commit without touching the app repo's
+   checkout, `git archive <sha> | tar -x -C <dir>` and build from there.
 3. Everything else: `terraform -chdir=envs/poc plan -out=tfplan`,
    review, apply. Expect 25-30 minutes with CloudFront: RDS ~10, the
    VPC origin ~8 (and about as long to delete), and the distribution
@@ -244,40 +248,36 @@ repo's git short SHA).
    (`brew install --cask session-manager-plugin`):
    `aws ecs execute-command --cluster meridian-poc --task <id> --container mcp-server --interactive --command "sh"`.
 
-- Session 3b (2026-10-08, branch `session-3b-cloudfront`):
-  `modules/edge` (CloudFront VPC origin + distribution; owns the ALB's
-  only ingress rule, from the VPC origin's AWS-managed security group)
-  and the Session 1 80/443-from-anywhere ALB rules removed from
-  `modules/network`. Decision 7 addendum.
-  - Applied and working: 43 of 44 resources, including the VPC origin
-    and the ALB ingress rule from its managed SG (looked up by name,
-    exactly one match).
-  - **Blocked:** `CreateDistribution` returned 403 "Your account must
-    be verified before you can add new CloudFront resources" (RequestID
-    `6b8ffae6-3974-4fc8-aa41-22c6e8a88351`). The plan is FREE/ACTIVE
-    with credits left, so this is not the spend-limit policy. Support
-    case opened 2026-10-08. Option B hits the same block (it also needs
-    a distribution); the only way around is option C (domain + ACM).
-  - **Not verified yet:** the `*.cloudfront.net` URL, a real MCP tool
-    call, and every negative check.
-  - **Retried 2026-10-13:** Support case 179148119900306 was resolved
-    ("verification successful", 10:31 UTC), but `CreateDistribution`
-    still returned the same 403 afterwards (RequestIDs
-    `044506f2-e583-4dcf-a60c-410a75a93512`,
-    `cf36ba35-4ed6-44b7-abec-b02d9e1901b6`). New case opened citing the
-    first. Everything else applied again; stack destroyed.
-  - **Fixed 2026-10-13:** the ECS service could start a task before the
-    `database-url` secret had a value (first task failed, service
-    tainted). `secret_arns` in `modules/secrets/outputs.tf` now
-    `depends_on` the secret versions. Validated, not reproduced. If a
+- Session 3b (branch `session-3b-cloudfront`, built 2026-10-08,
+  verified 2026-11-02): `modules/edge` (CloudFront VPC origin +
+  distribution; owns the ALB's only ingress rule, from the VPC origin's
+  AWS-managed security group, looked up by name) and the Session 1
+  80/443-from-anywhere ALB rules removed from `modules/network`.
+  Decision 7 addendum.
+  - **Account block history:** `CreateDistribution` returned 403 "Your
+    account must be verified..." on 2026-10-08 and 2026-10-13 (even
+    after Support case 179148119900306 was marked resolved). Cleared by
+    2026-11-02, confirmed first with a disabled throwaway distribution
+    made with the CLI (created, then deleted). That probe is the cheap
+    way to test any future CloudFront account issue without a bring-up.
+  - **Verified 2026-11-02** through `https://<id>.cloudfront.net`
+    (image `e5cbf50`): `/health` 200; `tools/list` with no key lists
+    all 8 tools; `tools/call list_active_incidents` with the agent key
+    returns the seeded incident (CloudFront → VPC origin → internal ALB
+    → Fargate → RDS). Negative checks: no key and wrong key on
+    `tools/call` return HTTP 200 with `isError: true` / `UNAUTHORIZED`
+    (the app has no 401, by design); plain `http://` gets 403 from
+    CloudFront; the ALB name resolves only to `10.0.x.x` and times out
+    from outside; the task's public IP on 3001 times out.
+  - **Secrets race fix proven:** `secret_arns` in
+    `modules/secrets/outputs.tf` `depends_on` the secret versions
+    (added 2026-10-13 after a first task started before `database-url`
+    had a value and the service got tainted). On the 2026-11-02 fresh
+    apply the first task came up healthy and nothing was tainted. If a
     service ever shows as tainted but healthy, `terraform untaint` it.
-  - **Next session:** wait for the new case. Before a full bring-up, a
-    cheap probe is a throwaway distribution made with the CLI
-    (`aws cloudfront create-distribution` against a dummy custom
-    origin; a 403 returns in seconds, delete it if it succeeds), so
-    there's no need to stand up the stack to find out. If still blocked, decide
-    between waiting and option C. After a successful apply, run the
-    checks below.
+  - **Known limit:** with the default `*.cloudfront.net` certificate the
+    viewer TLS minimum is fixed at `TLSv1`; raising it needs option C
+    (domain + ACM), which decision 7 ruled out for the POC.
 
 ## Next steps
 
@@ -286,16 +286,9 @@ repo's git short SHA).
 3. Session 3, split in two (decided 2026-10-05):
    - ~~**3a:** ECR, ECS on Fargate (ARM64), IAM roles, internal ALB,
      log group, verified from inside the VPC.~~ Done 2026-10-05.
-   - **3b (blocked, see build status):** CloudFront with a VPC origin
-     in front of the internal ALB for HTTPS (decision 7: no domain
-     purchase for a POC). Code is written; waiting on AWS Support to
-     verify the account for CloudFront. Then verify a real MCP tool call
-     end to end, plus the negative checks. Note the app doesn't return
-     HTTP 401: the `x-api-key` check is inside each tool handler
-     (`src/server.ts`), so a missing or wrong key on `tools/call` is
-     HTTP 200 with `isError: true`, and `tools/list` needs no key.
-     Also check plain `http://` is refused, the ALB name resolves only
-     to private IPs, and the task's public IP on 3001 times out.
+   - ~~**3b:** CloudFront with a VPC origin in front of the internal
+     ALB for HTTPS, verified with a real MCP tool call end to end plus
+     the negative checks.~~ Done 2026-11-02.
 4. Session 4: GitHub Actions — test → build → push to ECR → deploy,
    with a manual approval gate.
 5. Session 5: CloudWatch logs/alarms + the Budget alarm.
