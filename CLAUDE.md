@@ -43,6 +43,7 @@ meridian-infra/
 │ ├── database/ # RDS + subnet group
 │ ├── secrets/ # Secrets Manager
 │ ├── compute/ # ECR + ECS cluster/service (Fargate) + ALB
+│ ├── ci/ # IAM user + policy for the app repo's GitHub Actions deploy
 │ ├── edge/ # CloudFront + VPC origin, ALB ingress from CloudFront
 │ └── observability/ # CloudWatch log groups, alarms, budget alarm
 ├── docs/
@@ -78,12 +79,18 @@ infrastructure.
 - **AWS account constraints.** New-experience project, free plan,
   locked to `us-east-2` (resources can't be created in other Regions).
   CLI profile `meridian`, signed in via `aws login` (no long-lived
-  keys). Check any new service against the free-plan supported list
+  keys, apart from the CI deploy user's session-scoped key below). Check any new service against the free-plan supported list
   before designing around it.
 - **No fallback values for secrets or config.** Same fail-closed pattern
   as both application repos — Terraform variables have no defaults for
   anything secret; real values come from `terraform.tfvars` (gitignored)
   or environment variables at apply time, never committed.
+- **CI uses a session-scoped IAM user key, not OIDC.** The free-plan SCP
+  denies `iam:*Provider*`, so GitHub OIDC can't be created (decision 11).
+  The key is created by hand at bring-up, never by Terraform (it would
+  land in state), and deleted by hand before destroy. No
+  `force_destroy` on the user: it calls `iam:DeleteLoginProfile`, which
+  the SCP also denies.
 - **Local Terraform state for now**, not S3 + DynamoDB. Deliberate scope
   call for a single-operator POC — documented as a call, not an
   oversight. Revisit if this ever needs multi-operator or CI-triggered
@@ -183,9 +190,9 @@ build-focused (what was built, decided, verified, caught and torn down).
 
 ## Current build status
 
-Session 3 complete: 3a on 2026-10-05, 3b verified end to end on
-2026-11-02 after the CloudFront account block cleared. Infrastructure
-destroyed. Next is Session 4.
+Session 4 complete: GitHub Actions pipeline verified end to end on
+2026-11-03 (a CI-built image deployed through the gated pipeline).
+Infrastructure destroyed. Next is Session 5.
 
 - Session 1: `docs/architecture.md` (decisions 1–5) and `modules/network`
   (VPC `10.0.0.0/16`, 2 public + 2 private subnets in us-east-2a/b, IGW,
@@ -209,11 +216,8 @@ destroyed. Next is Session 4.
     VPC. It's only reachable publicly once 3b adds CloudFront.
   - **App repo follow-ups** (meridian-fde-enterprise-demo): ECR basic
     scan of `e5cbf50` found 7 critical / 33 high, all Debian OS packages
-    in `node:20-slim` (Node 20 is EOL since 2026-04). Move to a current
-    Node LTS slim base, and install `openssl` (Prisma warns it can't
-    detect it; still warning on the 2026-11-02 run, seed included).
-    Also drop dev dependencies from the image. Natural fit for
-    Session 4's CI work.
+    in `node:20-slim` (Node 20 is EOL since 2026-04). **Resolved in
+    Session 4** (Node 24 base, `openssl`, production dependencies only).
 
 ### Bring-up runbook
 
@@ -224,7 +228,10 @@ repo's git short SHA).
 1. ECR first (decision 9):
    `terraform -chdir=envs/poc plan -target=module.compute.aws_ecr_repository.app -target=module.compute.aws_ecr_lifecycle_policy.app -out=tfplan`,
    review, `terraform -chdir=envs/poc apply tfplan`.
-2. Push the image from the app repo's `main` (tags are immutable):
+2. Push the image from the app repo's `main` (tags are immutable). This
+   manual push is only the bootstrap: the service needs a healthy image
+   before the first apply can finish, and the pipeline can't create it.
+   After that, deploys go through the pipeline:
    `aws ecr get-login-password --profile meridian --region us-east-2 | docker login --username AWS --password-stdin <account>.dkr.ecr.us-east-2.amazonaws.com`,
    then `docker buildx build --platform linux/arm64 --provenance=false --sbom=false --output "type=image,name=<repo_url>:<sha>,push=true" .`
    Without the two flags Docker Desktop pushes an image index the scan
@@ -240,6 +247,17 @@ repo's git short SHA).
    review, apply. Expect 25-30 minutes with CloudFront: RDS ~10, the
    VPC origin ~8 (and about as long to delete), and the distribution
    a few more. The apply waits for the service to be healthy.
+   **CI deploy key** (decision 11, once the app repo's pipeline exists):
+   `aws iam create-access-key --user-name "$(terraform -chdir=envs/poc output -raw ci_user_name)" --profile meridian`,
+   then put `AccessKeyId`/`SecretAccessKey` in the app repo's `poc`
+   environment secrets (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`).
+   Run it in a separate terminal (not `!` in Claude Code, which would
+   put the secret in the transcript), and never save the output to a
+   file or commit it. One key serves every pipeline run in a bring-up.
+   The key is deleted before destroy (step 6), so the GitHub secrets go
+   dead; just overwrite them at the next bring-up (deleting them is
+   optional tidiness). After the service is up, deploys go through the
+   pipeline, not `image_tag`.
 4. Seed (fresh DB each bring-up): `aws ecs run-task` with the
    `task_definition` output, the public subnets, the app SG,
    `assignPublicIp=ENABLED`, and a container override command
@@ -247,6 +265,20 @@ repo's git short SHA).
 5. ECS Exec needs the Session Manager plugin
    (`brew install --cask session-manager-plugin`):
    `aws ecs execute-command --cluster meridian-poc --task <id> --container mcp-server --interactive --command "sh"`.
+6. Teardown. First delete the CI key, or the destroy fails at the end
+   on the IAM user with `DeleteConflict` (safe to re-run once it's gone):
+   `aws iam list-access-keys --user-name meridian-poc-github-deploy --profile meridian`,
+   then `aws iam delete-access-key --user-name meridian-poc-github-deploy --access-key-id <id> --profile meridian`.
+   Then `terraform -chdir=envs/poc plan -destroy -out=destroy.tfplan`,
+   review (an Opus moment), and `apply destroy.tfplan`: about 15
+   minutes, mostly the VPC origin. Afterwards deregister the
+   pipeline's task-definition revisions, which aren't in state:
+   `aws ecs list-task-definitions --family-prefix meridian-poc-mcp-server --status ACTIVE`
+   and `aws ecs deregister-task-definition` for each. Then read back that
+   nothing is left (state empty; no RDS, ALB, ECS, ECR, secrets,
+   CloudFront, VPC origin, non-default VPC, ENI, log group, or the CI
+   user). `aws cloudfront list-distributions` needs `--no-paginate` when
+   there are none, or the CLI prints nothing.
 
 - Session 3b (branch `session-3b-cloudfront`, built 2026-10-08,
   verified 2026-11-02): `modules/edge` (CloudFront VPC origin +
@@ -279,6 +311,36 @@ repo's git short SHA).
     viewer TLS minimum is fixed at `TLSv1`; raising it needs option C
     (domain + ACM), which decision 7 ruled out for the POC.
 
+- Session 4 (branch `session-4-github-actions`, verified 2026-11-03):
+  `modules/ci` (IAM user `meridian-poc-github-deploy`, path `/ci/`, with
+  a scoped inline policy; its key is created by hand each bring-up and
+  deleted before destroy),
+  `ignore_changes = [task_definition]` on the ECS service, and decision
+  11. In the app repo: a multi-stage Node 24 image and
+  `.github/workflows/deploy.yml` (`test` on every push/PR; `release`
+  only from a manual dispatch on `main`, behind the `poc` environment's
+  reviewer: ARM64 build, push tagged with the git short SHA, CRITICAL
+  scan gate, new task-definition revision, wait for stability, optional
+  `/health` check).
+  - **OIDC is not possible on this account:** the free-plan SCP denies
+    `iam:*Provider*` (even `ListOpenIDConnectProviders`). Hence the
+    session-scoped IAM user key. If advanced features are ever
+    activated, replace the user with an OIDC role.
+  - **Verified 2026-11-03:** a pipeline deploy took the service from
+    revision 5 (`0a88943`, pushed by hand) to revision 6 (`5efb174`,
+    built by CI): one running task, ALB target healthy, `/health` 200 and
+    a real `tools/call` through CloudFront, and `terraform plan` showing
+    no changes (so `ignore_changes` works). The first dispatch failed in
+    the scan gate (`aws ecr wait` fails on `ScanNotFoundException`
+    right after a push); fixed by polling with `--no-paginate`.
+  - Image scan: 0 critical / 5 high / 5 medium / 2 low, 180 MB
+    compressed. The 5 HIGH findings are not triaged yet.
+  - After a bring-up the service runs whatever the pipeline last
+    deployed. `image_tag` only matters for the first image (the manual
+    bootstrap push, since the pipeline can't create the first
+    revision). Deploys need a new commit SHA on the app repo's `main`,
+    because tags are immutable and an existing tag skips the build.
+
 ## Next steps
 
 1. ~~Session 1: Terraform foundations + decisions doc.~~ Done.
@@ -289,8 +351,8 @@ repo's git short SHA).
    - ~~**3b:** CloudFront with a VPC origin in front of the internal
      ALB for HTTPS, verified with a real MCP tool call end to end plus
      the negative checks.~~ Done 2026-11-02.
-4. Session 4: GitHub Actions — test → build → push to ECR → deploy,
-   with a manual approval gate.
+4. ~~Session 4: GitHub Actions — test → build → push to ECR → deploy,
+   with a manual approval gate.~~ Done 2026-11-03.
 5. Session 5: CloudWatch logs/alarms + the Budget alarm.
 6. Session 6: docs + wrap — architecture diagram, `docs/cost-notes.md`
    with actual observed spend vs. the original estimate, teardown/

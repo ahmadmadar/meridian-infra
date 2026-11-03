@@ -49,3 +49,8 @@ output "cloudfront_url" {
   description = "Public HTTPS endpoint; POST /mcp with an x-api-key header."
   value       = module.edge.cloudfront_url
 }
+
+output "ci_user_name" {
+  description = "Create its access key with the CLI at bring-up; see CLAUDE.md."
+  value       = module.ci.user_name
+}

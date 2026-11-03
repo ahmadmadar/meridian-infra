@@ -63,6 +63,15 @@ against the real resources with read-only AWS CLI calls, then destroy.
 - [x] A CLI probe for the CloudFront account block (a disabled
       throwaway distribution, deleted after it was created), and the
       end-to-end and negative checks through the CloudFront URL
+- [x] `modules/ci/`: the deploy IAM user and its scoped policy, plus
+      `ignore_changes` on the ECS service's task definition, and
+      decision 11
+- [x] In the app repo: a multi-stage Node 24 Dockerfile (non-root,
+      `openssl`, production dependencies only) and the GitHub Actions
+      workflow (test, then build, scan gate and deploy behind an
+      approval)
+- [x] A live pipeline run, checked against ECS, ECR, the ALB target
+      and CloudFront, plus a `plan` showing no drift afterwards
 
 ## What required architectural decisions
 
@@ -103,6 +112,23 @@ against the real resources with read-only AWS CLI calls, then destroy.
   managed policy allows pulling from any repository and writing to any
   log group. The inline one names this repository, this log group and
   the three secret ARNs.
+- **A session-scoped IAM user key instead of GitHub OIDC.** The free
+  plan's SCP denies `iam:*Provider*`, so OIDC can't be created. I chose
+  an IAM user with a narrow deploy policy whose access key is made by
+  hand at bring-up and deleted with the stack, over AWS-native CI
+  (a bigger session, not GitHub Actions) or activating advanced
+  features (loses the spend cap). Decision 11.
+- **One gated `release` job.** I chose a single approval per run over
+  two environments with two users. The build job and deploy job
+  couldn't share one approval, so build, scan and deploy are one job.
+- **CI owns the running task definition.** `ignore_changes` on the
+  service means a pipeline deploy isn't rolled back by the next apply.
+  The cost is that `image_tag` only sets the first image.
+- **Node 24, not 26.** Node 26 only became LTS on 2026-10-28; 24 is the
+  mature LTS and the safer fit for Prisma 6 and vitest 2.
+- **Fail the pipeline on CRITICAL scan findings, not HIGH.** The new
+  image has 5 HIGH that I haven't triaged; blocking on them would
+  stop every deploy until I do.
 
 ## What got caught and corrected
 
@@ -167,6 +193,53 @@ against the real resources with read-only AWS CLI calls, then destroy.
   Debian OS packages in `node:20-slim`, and Node 20 has been past
   end-of-life since April 2026. Logged as an app-repo follow-up rather
   than patched mid-session.
+- **OIDC was blocked, and the design assumed it.** Claude's walkthrough
+  planned GitHub OIDC. Before any Terraform was written it checked the
+  live account: even `ListOpenIDConnectProviders` returned an explicit
+  SCP deny, and the SCP text confirmed `iam:*Provider*` is denied.
+  `terraform plan` can't see an SCP, so this would only have shown up
+  at apply.
+- **The "one approval" design was wrong about GitHub.** The walkthrough
+  said one approval would cover both the build and deploy jobs. GitHub
+  asks once per job that uses a protected environment, so the gate would
+  have fired before the build and again before the deploy. Claude
+  caught it while writing the workflow, merged the work into one job,
+  and corrected decision 11.
+- **Annotated tags pinned to the wrong SHA.** Three actions' tags are
+  annotated, and the first lookup returned the tag object's SHA, not the
+  commit's, which `uses:` rejects. Claude resolved them with the `^{}`
+  dereference instead.
+- **The scan gate failed on its first real run.** `aws ecr wait
+  image-scan-complete` fails with `ScanNotFoundException` right after a
+  push, because ECR creates the scan record a few seconds later. Nothing
+  was deployed: the step failed before the task definition was touched.
+  Claude replaced the waiter with a polling loop. Running the real step
+  script against live ECR then exposed a second bug: the CLI's
+  auto-pagination crashes ("'NoneType' object does not support item
+  assignment") while a scan is `IN_PROGRESS`. Fixed with `--no-paginate`.
+  Neither bug was visible to the linter; the script was retested on an
+  in-progress image, a completed one and a missing tag.
+- **An empty `--user-name`.** `create-access-key` failed with "Parameter
+  validation failed" when I ran it before the stack existed:
+  `terraform output` printed nothing, so the name was empty. Claude
+  diagnosed it from empty state; the runbook now uses the literal name.
+- **`force_destroy` collided with the SCP.** I'd set
+  `force_destroy = true` on the CI user so destroy would remove the
+  hand-made key. On teardown it deleted the key and the policy, then
+  failed on the user: the provider also calls `DeleteLoginProfile`, and
+  the SCP denies `iam:*LoginProfile*`, in the same statement Claude had
+  read for OIDC that morning. Claude had checked the actions the module
+  creates, not the ones the provider calls on the way out. The leftover
+  user had no keys and no policies, so it could do nothing. Fixed with
+  `force_destroy = false` and a runbook step to delete the key before
+  destroy, then proven by destroying the leftover user that way (decision
+  11).
+- **More zsh word-splitting.** Three more commands stored in a string
+  variable didn't split: a `docker run` whose environment flags were
+  one argument, a block of `aws` calls, and a `git ls-remote` loop. The
+  container failed at boot, and the other two failed at parsing; no
+  ECS task was launched and nothing was changed. Fixed with a wrapper
+  function and explicit arguments.
 
 ---
 
@@ -492,3 +565,105 @@ instances or manual snapshots, load balancers, target groups, ECS
 clusters, ECR repositories, secrets (including scheduled deletions),
 CloudFront distributions or VPC origins, non-default VPCs, Elastic IPs,
 network interfaces or app log groups.
+
+### 2026-11-03: Session 4, GitHub Actions pipeline
+
+**Design first, and an assumption that failed.** Opus 5.5 did the design
+walkthrough, as the model rules say for IAM shape decisions. It read both
+repos first: the app repo had no CI at all, tests need a real Postgres,
+and `prisma` and `tsx` are dev dependencies that production uses (boot
+migration, seed). I chose one approval gate and moving `tsx` into
+`dependencies`. Before writing any Terraform, Claude checked the plan's
+OIDC assumption against the live account and found the SCP deny on IAM
+providers. I chose option A, a session-scoped IAM user key (decision 11).
+
+**Models.** Opus 5.5 through writing `modules/ci`; I then switched to
+Sonnet 5.5 for the docs, the app-repo work, the bring-up and the
+verification, then back to Opus 5.5 for the pre-destroy review and the
+`force_destroy` fix, as the model rules say for anything hard to undo.
+
+**Built, infra repo.** `modules/ci`: the user `meridian-poc-github-deploy`
+(path `/ci/`) with a six-statement inline policy. ECR
+push and scan-read are on the one repository, `UpdateService` is on the
+one service, `PassRole` is limited to the two task roles with
+`iam:PassedToService`, and the only `*` resources are the three actions
+AWS can't scope. No `aws_iam_access_key` resource, since it would write
+the secret into state. Policy ARNs are built from `name_prefix` so the
+`-target` ECR bootstrap doesn't drag the stack in. `ignore_changes` on
+the service's task definition. Decision 11 and a runbook step for the
+key.
+
+**Built, app repo.** Multi-stage `node:24-slim` image. Built locally and
+run against a throwaway Postgres 16 before the workflow existed:
+migration applied on boot, `/health` 200, the seed wrote 20 / 60 / 1, the
+container runs as `node`, vitest is absent. The workflow runs `test` on
+every push and PR, and `release` only from a manual dispatch on `main`,
+behind the `poc` environment: ARM64 build on a native runner, push tagged
+with the git short SHA, scan gate, new task-definition revision, wait for
+stability, optional `/health` check. Actions pinned to commit SHAs,
+actionlint clean. The PR's `test` job passed on GitHub's runners.
+
+**Bring-up.** I set `image_tag` to the merged `main` SHA `0a88943`.
+Claude built from a `git archive` of that commit, ECR first (2 to add),
+`buildx` push, then the full plan: 46 to add, 0 to change, 0 to destroy.
+Claude checked the CI policy statement by statement and that no
+credential value appears anywhere in the plan; the task definition's
+image tag couldn't be checked in the plan because the container
+definitions embed secret ARNs not yet known. I approved the apply. The
+service came up healthy on task definition revision 5, and the seed
+task wrote 20 accounts, 60 tickets and 1 incident. I created the CI key
+in a separate terminal, so it never entered the conversation, and added
+it as the `poc` environment's two secrets.
+
+**Image scan.** The new image scanned at 0 critical, 5 high, 5 medium,
+2 low, against 7 critical and 33 high for the Node 20 image, and is 180
+MB compressed against about 299 MB. Prisma's OpenSSL warning no longer
+appears in any task log on the live stack (two service tasks and the
+seed).
+
+**The pipeline, run twice.** First dispatch (`3b57c48`, a docs commit):
+build and push worked, the scan gate failed as described above, nothing
+deployed. I fixed it on a branch, PR #3 passed its test job, and merged
+it. Second dispatch (`5efb174`) built and pushed a fresh image, passed
+the gate, and deployed. The IAM policy needed no changes on its first
+real use.
+
+**Verified for real**, against AWS after the run rather than from the
+green tick:
+
+- the service was on revision 6 with image `5efb174`, one running task,
+  one `COMPLETED` deployment, and the ALB target healthy,
+- `/health` returned 200 through CloudFront, and `tools/call
+  list_active_incidents` with the agent key still returned the seeded
+  incident (the database was untouched by the deploy),
+- a wrong key got `UNAUTHORIZED`,
+- the new task's log showed "No pending migrations to apply",
+- `terraform plan -detailed-exitcode` exited 0, "No changes", with the
+  service on a revision Terraform didn't create. That is
+  `ignore_changes` working.
+
+Earlier in the session the 3b negative checks were re-run on the fresh
+stack: plain `http://` got 403, the ALB resolved only to `10.0.x.x` and
+timed out from outside, and the task's public IP on 3001 timed out.
+
+**Still open.** The 5 HIGH scan findings aren't triaged. The pipeline's
+`test` and `release` jobs both ran only on this one stack; nothing has
+tested a rollback of a bad image yet, though the circuit breaker is on.
+
+**Torn down** from a saved `plan -destroy` that Claude reviewed on Opus
+before I approved it: 48 to destroy (the 46 plus the two ECR resources),
+all in this project's modules, with RDS skipping its final snapshot and
+the secrets on a zero-day recovery window. Distribution 3m17s, service
+3m32s, RDS 2m52s, VPC origin 6m56s. 47 of 48 went; the CI user failed
+on the SCP, as described above. Claude then set `force_destroy = false`,
+applied that as a state-only change (plan: one in-place update, nothing
+else), and destroyed the user from a targeted plan. That called only
+`DeleteUser` and succeeded. Claude also deregistered task-definition
+revision 6, which the pipeline had registered outside state. Afterwards
+state was empty, and a read-back found no RDS instances or manual
+snapshots, load balancers, target groups, ECS clusters or active task
+definitions, ECR repositories, secrets (including scheduled deletions),
+CloudFront distributions or VPC origins, non-default VPCs, Elastic IPs,
+network interfaces, app log groups, `meridian-poc-*` roles, or the CI
+user. I removed the two GitHub environment secrets, which were dead
+once the key was deleted.
