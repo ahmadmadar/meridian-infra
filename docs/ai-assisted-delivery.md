@@ -72,6 +72,13 @@ against the real resources with read-only AWS CLI calls, then destroy.
       approval)
 - [x] A live pipeline run, checked against ECS, ECR, the ALB target
       and CloudFront, plus a `plan` showing no drift afterwards
+- [x] Session 5: the alerting in `modules/observability/` (SNS topic and
+      policy, seven alarms, the $10 Budget), a Budgets/SNS/CloudWatch API
+      probe before any Terraform, and a forced-alarm delivery test
+- [x] Session 6: the full-stack Mermaid diagram in
+      `docs/architecture.md`, `docs/cost-notes.md` (built from Cost
+      Explorer's gross usage), `docs/runbook.md` (moved out of
+      CLAUDE.md), and the README rewrite
 
 ## What required architectural decisions
 
@@ -755,3 +762,52 @@ task definitions, ECR repositories, secrets (including scheduled
 deletions), CloudFront distributions or VPC origins, non-default VPCs,
 Elastic IPs, network interfaces, app log groups, `meridian-poc-*` roles,
 the CI user, `meridian-poc-*` alarms, SNS topics or Budgets.
+
+### 2026-11-06: Session 6, docs and wrap
+
+**No bring-up.** This session is documentation only, so nothing was
+applied, and there was nothing to destroy. Sonnet 5.5 throughout, as the
+model rules say for docs; I switched back from Opus (used the same day
+for the Session 5 destroy review) before starting.
+
+**Built.**
+
+- `docs/architecture.md`: a Mermaid diagram of everything Terraform
+  builds, grouped by module, with the security boundaries called out
+  underneath. The existing ASCII request-path diagram stays above it.
+- `docs/cost-notes.md`: observed spend against the decision 1 estimate.
+- `docs/runbook.md`: the bring-up, verification and teardown steps,
+  moved out of CLAUDE.md and imported back with `@docs/runbook.md`, so
+  every Claude session still loads it. I took the chance to fold in
+  things learned since it was written: confirm the SNS email, wait for
+  the image push before the full apply, the empty-output CLI gotchas, and
+  a verification section.
+- `README.md`: rewritten. It still described a Session 1 stack with a
+  public ALB and a "Planned" table, which hadn't been true since 3b.
+
+**Decided.** Moving the runbook rather than copying it: two copies would
+drift, and the content is operator documentation, not Claude
+instructions. For the cost numbers I used gross `Usage` records
+(`RECORD_TYPE = Usage`), because the default cost view nets the free-plan
+credits out and shows $0.00 for everything.
+
+**Caught while writing the cost notes.** The ALB bills in whole, exactly
+priced hours ($0.0225), so billed ALB hours (4.0 in October, 7.0 in
+November) gave a clean unit for turning monthly totals into per-hour
+rates. That showed the original estimate was close overall for the wrong
+reasons: it over-counted public IPv4 (decision 7 removed two) and used
+x86 Fargate prices (decision 8 made it ARM64), and it left out RDS and
+Secrets Manager entirely.
+
+**What got wrong.** The README had drifted three sessions behind, and its
+Terraform prerequisite said 1.9 when write-only arguments need 1.11. My
+first README rewrite also said every session had been applied and
+destroyed, which isn't true of this one; I caught that on a re-read and
+fixed it. The runbook's repo-structure edit in CLAUDE.md first missed
+because that tree uses different indentation than I assumed.
+
+**Still open.** The Session 5 bring-up hadn't posted to billing when I
+wrote the cost notes, so its cost isn't in the totals yet; add it when
+it posts. The Mermaid diagram hasn't been rendered in GitHub yet. The 5
+HIGH image-scan findings are still untriaged, and the Budget's own alert
+emails are still untested.
