@@ -20,3 +20,13 @@ variable "image_tag" {
   description = "App image tag in ECR: the meridian-fde-enterprise-demo git short SHA that was pushed."
   type        = string
 }
+
+variable "alert_email" {
+  description = "Receives CloudWatch alarm (SNS) and Budget alert emails."
+  type        = string
+}
+
+variable "monthly_budget_usd" {
+  description = "Monthly cost budget in USD for the Budget alarm."
+  type        = number
+}
