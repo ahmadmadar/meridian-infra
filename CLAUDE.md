@@ -190,9 +190,9 @@ build-focused (what was built, decided, verified, caught and torn down).
 
 ## Current build status
 
-Session 4 complete: GitHub Actions pipeline verified end to end on
-2026-11-03 (a CI-built image deployed through the gated pipeline).
-Infrastructure destroyed. Next is Session 5.
+Session 5 complete: CloudWatch alarms, SNS email alerts and the $10
+monthly Budget verified on 2026-11-06 (a forced alarm delivered both the
+ALARM and OK emails). Infrastructure destroyed. Next is Session 6.
 
 - Session 1: `docs/architecture.md` (decisions 1–5) and `modules/network`
   (VPC `10.0.0.0/16`, 2 public + 2 private subnets in us-east-2a/b, IGW,
@@ -258,6 +258,12 @@ repo's git short SHA).
    dead; just overwrite them at the next bring-up (deleting them is
    optional tidiness). After the service is up, deploys go through the
    pipeline, not `image_tag`.
+   **Confirm the SNS email** (Session 5): the apply sends an "AWS
+   Notification - Subscription Confirmation" email to `alert_email`.
+   Click the link in the newest one; until then alarms are silently
+   dropped. Check with `aws sns get-topic-attributes --topic-arn <arn>`
+   (`SubscriptionsConfirmed` = 1). The Budget emails directly and doesn't
+   need this.
 4. Seed (fresh DB each bring-up): `aws ecs run-task` with the
    `task_definition` output, the public subnets, the app SG,
    `assignPublicIp=ENABLED`, and a container override command
@@ -341,6 +347,28 @@ repo's git short SHA).
     revision). Deploys need a new commit SHA on the app repo's `main`,
     because tags are immutable and an existing tag skips the build.
 
+- Session 5 (branch `session-5-observability`, verified 2026-11-06):
+  `modules/observability` gains an SNS topic `meridian-poc-alerts`
+  (topic policy lets only CloudWatch publish, scoped by
+  `aws:SourceAccount`) with an email subscription, seven alarms (ALB
+  target 5xx, no healthy hosts, unhealthy hosts, ECS CPU and memory,
+  RDS CPU, RDS free storage under 3 GiB), and a $10 monthly Budget
+  (80% actual, 100% forecasted, emailed directly). New no-default
+  variables `alert_email` and `monthly_budget_usd`; new outputs for the
+  alarm dimensions in `compute` and `database`. Container Insights and
+  CloudFront alarms skipped (cost; us-east-1 metrics).
+  - **The Budget lives in `envs/poc`** and is destroyed with the stack, a
+    deliberate call: spend is about $0 while destroyed. The free-plan SCP
+    allows `CreateBudget`. Billing data lags 8–24 hours, so the Budget
+    catches a stack left running, not a fast spike.
+  - **Verified 2026-11-06:** `plan` clean after apply, all alarms `OK`,
+    the usual CloudFront end-to-end and negative checks, all 8 tools, and
+    `aws cloudwatch set-alarm-state` on `meridian-poc-alb-target-5xx`
+    delivered an ALARM email, then an OK email on the next evaluation.
+    Budget alert emails themselves are untested.
+  - The AWS CLI on this machine lives in `~/.local/bin`, which a fresh
+    Claude Code shell may not have on `PATH`.
+
 ## Next steps
 
 1. ~~Session 1: Terraform foundations + decisions doc.~~ Done.
@@ -353,7 +381,8 @@ repo's git short SHA).
      the negative checks.~~ Done 2026-11-02.
 4. ~~Session 4: GitHub Actions — test → build → push to ECR → deploy,
    with a manual approval gate.~~ Done 2026-11-03.
-5. Session 5: CloudWatch logs/alarms + the Budget alarm.
+5. ~~Session 5: CloudWatch logs/alarms + the Budget alarm.~~ Done
+   2026-11-06.
 6. Session 6: docs + wrap — architecture diagram, `docs/cost-notes.md`
    with actual observed spend vs. the original estimate, teardown/
    bring-up runbook, README tying back to the server repo's

@@ -34,3 +34,13 @@ output "alb_dns_name" {
 output "target_group_arn" {
   value = aws_lb_target_group.app.arn
 }
+
+output "alb_arn_suffix" {
+  description = "CloudWatch's LoadBalancer dimension: the part of the ARN after \"loadbalancer/\"."
+  value       = aws_lb.app.arn_suffix
+}
+
+output "target_group_arn_suffix" {
+  description = "CloudWatch's TargetGroup dimension."
+  value       = aws_lb_target_group.app.arn_suffix
+}

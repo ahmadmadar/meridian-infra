@@ -6,3 +6,7 @@ aws_profile = "meridian"
 
 # App image to run: the git short SHA pushed to ECR (see CLAUDE.md bring-up).
 image_tag = "e5cbf50"
+
+# Alert email and Budget ceiling (Session 5).
+alert_email        = "you@example.com"
+monthly_budget_usd = 10

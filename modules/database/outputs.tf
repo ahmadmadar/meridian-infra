@@ -25,3 +25,8 @@ output "master_password" {
   value       = ephemeral.random_password.master.result
   ephemeral   = true
 }
+
+output "identifier" {
+  description = "CloudWatch's DBInstanceIdentifier dimension."
+  value       = aws_db_instance.main.identifier
+}

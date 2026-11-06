@@ -667,3 +667,91 @@ CloudFront distributions or VPC origins, non-default VPCs, Elastic IPs,
 network interfaces, app log groups, `meridian-poc-*` roles, or the CI
 user. I removed the two GitHub environment secrets, which were dead
 once the key was deleted.
+
+### 2026-11-06: Session 5, CloudWatch alarms and the Budget
+
+**Design first.** Sonnet 5.5 did the walkthrough, since this session is
+module writing rather than a shape-setting decision. Claude read the
+existing `modules/observability` (just the log group) and proposed one
+SNS topic with an email subscription, seven alarms and a monthly Budget.
+I made four calls: keep the Budget in `envs/poc` (spend is about $0
+while the stack is destroyed, and the Budget is live whenever there's
+something to spend), a $10 ceiling, my own address for alerts, and the
+alarm list as proposed. Claude skipped Container Insights (extra cost,
+and the healthy-host alarm covers the same failure) and CloudFront
+alarms (those metrics live in us-east-1, which the project rules limit to
+WAF and CloudWatch Logs).
+
+**Models.** Sonnet 5.5 for the design, the modules, the bring-up and the
+verification. I switched to Opus 5.5 for the pre-destroy plan review and
+the teardown, as the model rules say for anything hard to undo.
+
+**Built.** In `modules/observability`: an SNS topic with a topic policy
+that lets only `cloudwatch.amazonaws.com` publish (scoped by
+`aws:SourceAccount`) and an email subscription; seven standard alarms
+(ALB target 5xx, no healthy hosts, unhealthy hosts, ECS CPU and memory,
+RDS CPU, RDS free storage under 3 GiB of the 20 GiB volume), all within
+the 10 free; and a $10 monthly Budget alerting at 80% actual and 100%
+forecasted, emailing directly so it doesn't depend on the SNS
+confirmation. Outputs added to `compute` (ALB and target-group ARN
+suffixes) and `database` (identifier). `alert_email` and
+`monthly_budget_usd` have no defaults.
+
+**Probed first.** Before writing Terraform, Claude checked the Budgets,
+SNS and CloudWatch APIs against the live account. Reads worked. The
+create permission for Budgets couldn't be proven without creating one,
+so it was left to the apply; it succeeded.
+
+**Verified for real**, against AWS rather than from `apply` exiting 0:
+
+- `validate` passed, so there is no module cycle even though `compute`
+  takes the log group from `observability` and the alarms take `compute`'s
+  outputs. No separate alarms module was needed.
+- after a full bring-up, `plan` showed no changes, the service was 1/1
+  with a completed rollout, all seven alarms were `OK`, and the Budget
+  existed at $10,
+- the seed task exited 0, `/health` returned 200, `http://` got 403,
+  `list_active_incidents` with the agent key returned the seeded
+  incident, a wrong key got `UNAUTHORIZED`, and `tools/list` returned
+  all 8 tools,
+- the alarm path, end to end: with the subscription confirmed (1 confirmed,
+  0 pending), forcing `meridian-poc-alb-target-5xx` into `ALARM` with
+  `set-alarm-state` delivered an ALARM email, and the alarm's next
+  evaluation delivered the OK email. Both directions work.
+
+**What got wrong.**
+
+- The subscription stays `PendingConfirmation` until someone clicks the
+  emailed link, and Terraform can't. The first attempt to test the alarm
+  was held until the topic showed 1 confirmed, because SNS drops
+  messages to an unconfirmed subscription and the test would have been
+  meaningless. This is a manual step after every bring-up.
+- My own tooling slips, none of which touched AWS: the AWS CLI wasn't on
+  the shell's PATH (it lives in `~/.local/bin`), the first probe ran on
+  an expired `aws login` session, a `$P` flags variable didn't
+  word-split in zsh, and a log-stream lookup picked the wrong stream.
+  My quick tools count of 7 was a grep that missed `get_account_360`;
+  the full JSON showed 8.
+- The first `plan` used the example's `image_tag` (the old Node 20
+  image). The real bootstrap used `0a88943`, the tag already in
+  `terraform.tfvars`.
+
+**Still open.** The 5 HIGH scan findings aren't triaged. The Budget's
+billing data lags 8 to 24 hours, so it catches a stack left running, not
+a fast spike. Nothing has tested the Budget's alert emails, only the
+alarm path.
+
+**Torn down** from a saved `plan -destroy` that Claude reviewed on Opus
+before applying: 59 to destroy and nothing else, all in this project's
+modules. RDS skipping its final snapshot with backups off, the secrets on
+a zero-day recovery window, ECR's `force_delete` taking image `0a88943`
+with it, and the CI user with `force_destroy = false` and no access key
+(none was created this session, as no pipeline run was needed). All 59
+went with no errors: service 2m42s, RDS 3m4s, distribution 3m27s, VPC
+origin 7m3s, the CI user 1s. Claude deregistered task-definition revision
+7. Afterwards state was empty, and a read-back found no RDS instances or
+manual snapshots, load balancers, target groups, ECS clusters or active
+task definitions, ECR repositories, secrets (including scheduled
+deletions), CloudFront distributions or VPC origins, non-default VPCs,
+Elastic IPs, network interfaces, app log groups, `meridian-poc-*` roles,
+the CI user, `meridian-poc-*` alarms, SNS topics or Budgets.

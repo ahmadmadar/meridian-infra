@@ -73,6 +73,18 @@ module "observability" {
   source = "../../modules/observability"
 
   name_prefix = local.name_prefix
+
+  alert_email        = var.alert_email
+  monthly_budget_usd = var.monthly_budget_usd
+
+  # Alarm dimensions. compute consumes this module's log group and this
+  # module consumes compute's ARN suffixes; Terraform resolves that per
+  # resource, so there is no cycle.
+  alb_arn_suffix          = module.compute.alb_arn_suffix
+  target_group_arn_suffix = module.compute.target_group_arn_suffix
+  ecs_cluster_name        = module.compute.cluster_name
+  ecs_service_name        = module.compute.service_name
+  db_identifier           = module.database.identifier
 }
 
 module "compute" {
