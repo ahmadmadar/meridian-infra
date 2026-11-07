@@ -50,6 +50,7 @@ meridian-infra/
 │ ├── architecture.md
 │ ├── cost-notes.md
 │ ├── runbook.md
+│ ├── images/ # the two README diagrams (PNG exports)
 │ └── ai-assisted-delivery.md
 └── README.md
 
@@ -191,10 +192,12 @@ build-focused (what was built, decided, verified, caught and torn down).
 
 ## Current build status
 
-Session 6 complete (docs only, 2026-11-06): full-stack diagram in
-`docs/architecture.md`, `docs/cost-notes.md`, `docs/runbook.md`, and a
-README rewrite. The build is finished. Infrastructure destroyed. Open
-items are listed under Next steps.
+Session 6 complete and merged (docs only, 2026-11-06): full-stack Mermaid
+diagram in `docs/architecture.md`, `docs/cost-notes.md`, `docs/runbook.md`,
+a README rewrite, and two exported diagrams in `docs/images/`
+(`runtime-architecture.png`, `delivery-and-operations.png`, made in Claude
+Design and embedded in the README). The planned build is finished.
+Infrastructure destroyed. Open items are listed under Next steps.
 
 - Session 1: `docs/architecture.md` (decisions 1–5) and `modules/network`
   (VPC `10.0.0.0/16`, 2 public + 2 private subnets in us-east-2a/b, IGW,
@@ -336,7 +339,10 @@ The planned build is finished. Open items, none blocking:
 
 - Add the Session 5 bring-up's cost to `docs/cost-notes.md` once it posts
   to Cost Explorer (billing lags 8–24 hours; see "How to re-check" there).
-- Confirm the Mermaid diagram in `docs/architecture.md` renders on GitHub.
+  Still unposted as of the evening of 2026-11-06.
+- Confirm the Mermaid diagram in `docs/architecture.md` renders on GitHub
+  (the PNG diagrams in the README were checked; the Mermaid one has not
+  been seen rendered).
 - Triage the 5 HIGH ECR scan findings on the Node 24 image (app repo).
 - The Budget's own alert emails are untested; only the alarm path is.
 
