@@ -4,8 +4,8 @@ These are the calls I made before provisioning anything, and why. Each
 one is a deliberate trade-off for a single-operator proof of concept
 that gets torn down between sessions, not a claim about what a large
 production system should do. Prices are AWS list prices for `us-east-2`
-at the time of writing. `docs/cost-notes.md` will compare them against
-what I actually got billed.
+at the time of writing. [`cost-notes.md`](cost-notes.md) compares them
+against what I actually got billed.
 
 ## Target shape
 
@@ -38,6 +38,89 @@ what I actually got billed.
 | Private subnets | `10.0.10.0/24` (us-east-2a), `10.0.11.0/24` (us-east-2b) |
 | NAT Gateway | None |
 | Task size | 0.25 vCPU / 0.5 GB, ARM64 (Graviton) |
+
+## The full picture
+
+The request path above is only part of the stack. This is everything
+Terraform builds, grouped by the module that owns it. Solid arrows are
+runtime traffic or reads; dashed arrows are things that happen at deploy
+time or only when something goes wrong.
+
+```mermaid
+flowchart LR
+    client([MCP client]) -->|HTTPS| cf
+
+    subgraph edge["modules/edge"]
+        cf["CloudFront<br/>*.cloudfront.net"]
+        vo[VPC origin]
+        cf --> vo
+    end
+
+    subgraph vpc["modules/network: VPC 10.0.0.0/16, us-east-2"]
+        subgraph priv["private subnets (2 AZs)"]
+            alb["Internal ALB<br/>modules/compute"]
+            rds[("RDS Postgres 16<br/>modules/database")]
+        end
+        subgraph pub["public subnets (2 AZs)"]
+            task["Fargate task, ARM64<br/>modules/compute"]
+        end
+        vo -->|"ALB SG: only from the<br/>VPC origin's SG"| alb
+        alb -->|"3001, ALB SG only"| task
+        task -->|"5432, app SG only"| rds
+    end
+
+    sm["Secrets Manager<br/>modules/secrets<br/>database-url, 2 MCP keys"]
+    ecr["ECR<br/>modules/compute"]
+    logs["CloudWatch Logs<br/>/ecs/meridian-poc/mcp-server"]
+
+    task -.->|"reads secrets at start<br/>(via the IGW, no NAT)"| sm
+    task -->|logs| logs
+    ecr -.->|image pull| task
+
+    subgraph obs["modules/observability"]
+        alarms["7 CloudWatch alarms"]
+        sns["SNS topic"]
+        budget["$10 monthly Budget"]
+    end
+
+    alb -.->|metrics| alarms
+    task -.->|metrics| alarms
+    rds -.->|metrics| alarms
+    alarms --> sns
+    sns -->|email| me([operator])
+    budget -->|email| me
+
+    subgraph ci["modules/ci + the app repo"]
+        gha["GitHub Actions<br/>test, then gated release"]
+        user["IAM user, scoped policy<br/>session-scoped key"]
+        gha --> user
+    end
+
+    user -.->|"push image, register<br/>task definition, update service"| ecr
+```
+
+What the diagram is meant to show:
+
+- **Two kinds of subnet, on purpose.** Only the Fargate task is in a
+  public subnet, and only so it can reach ECR, Secrets Manager and
+  CloudWatch Logs directly without a NAT Gateway (decision 2). Its
+  security group accepts nothing from the internet. The ALB and the
+  database are in private subnets.
+- **The ALB has no public address.** The only way in is CloudFront's VPC
+  origin (decision 7), and the ALB's only ingress rule references that
+  origin's AWS-managed security group.
+- **The database is never publicly accessible.** It sits in private
+  subnets with no route to the internet, and accepts port 5432 only from
+  the app's security group, by reference and never by CIDR (decision 3).
+- **Secrets never touch Terraform state.** They are written with
+  write-only arguments (decision 6), and the task reads them at start
+  through its own execution role (decision 10).
+- **Alerting has two independent paths.** Alarms go through SNS, which
+  needs the one-time email confirmation. The Budget emails directly, so
+  it works even if the SNS subscription is unconfirmed.
+- **The CI user is the only long-lived credential**, and it exists
+  because the free plan blocks GitHub OIDC (decision 11). Its key is
+  created by hand at bring-up and deleted before destroy.
 
 ## 1. Compute: ECS Fargate + ALB, not App Runner
 

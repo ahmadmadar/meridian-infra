@@ -49,6 +49,7 @@ meridian-infra/
 ├── docs/
 │ ├── architecture.md
 │ ├── cost-notes.md
+│ ├── runbook.md
 │ └── ai-assisted-delivery.md
 └── README.md
 
@@ -190,9 +191,10 @@ build-focused (what was built, decided, verified, caught and torn down).
 
 ## Current build status
 
-Session 5 complete: CloudWatch alarms, SNS email alerts and the $10
-monthly Budget verified on 2026-11-06 (a forced alarm delivered both the
-ALARM and OK emails). Infrastructure destroyed. Next is Session 6.
+Session 6 complete (docs only, 2026-11-06): full-stack diagram in
+`docs/architecture.md`, `docs/cost-notes.md`, `docs/runbook.md`, and a
+README rewrite. The build is finished. Infrastructure destroyed. Open
+items are listed under Next steps.
 
 - Session 1: `docs/architecture.md` (decisions 1–5) and `modules/network`
   (VPC `10.0.0.0/16`, 2 public + 2 private subnets in us-east-2a/b, IGW,
@@ -221,70 +223,12 @@ ALARM and OK emails). Infrastructure destroyed. Next is Session 6.
 
 ### Bring-up runbook
 
-Needs a live `aws login --profile meridian`, Docker running, and
-`envs/poc/terraform.tfvars` (copy the `.example`; `image_tag` is the app
-repo's git short SHA).
+The bring-up, verification and teardown runbook lives in
+`docs/runbook.md` (moved there in Session 6, so it reads as operator
+documentation rather than Claude instructions). It is imported here so
+every session loads it:
 
-1. ECR first (decision 9):
-   `terraform -chdir=envs/poc plan -target=module.compute.aws_ecr_repository.app -target=module.compute.aws_ecr_lifecycle_policy.app -out=tfplan`,
-   review, `terraform -chdir=envs/poc apply tfplan`.
-2. Push the image from the app repo's `main` (tags are immutable). This
-   manual push is only the bootstrap: the service needs a healthy image
-   before the first apply can finish, and the pipeline can't create it.
-   After that, deploys go through the pipeline:
-   `aws ecr get-login-password --profile meridian --region us-east-2 | docker login --username AWS --password-stdin <account>.dkr.ecr.us-east-2.amazonaws.com`,
-   then `docker buildx build --platform linux/arm64 --provenance=false --sbom=false --output "type=image,name=<repo_url>:<sha>,push=true" .`
-   Without the two flags Docker Desktop pushes an image index the scan
-   and lifecycle rule mishandle. Use `buildx` rather than `docker push`:
-   on Docker Desktop's containerd image store `docker push` timed out
-   ("timeout awaiting response headers") on the large layers, on
-   different layers each run; the `buildx` push succeeded in ~7 minutes
-   (~299MB compressed). In zsh write `"${REPO}:${SHA}"`, because
-   `$REPO:e...` is read as a modifier and silently mis-tags the image.
-   To build a specific older commit without touching the app repo's
-   checkout, `git archive <sha> | tar -x -C <dir>` and build from there.
-3. Everything else: `terraform -chdir=envs/poc plan -out=tfplan`,
-   review, apply. Expect 25-30 minutes with CloudFront: RDS ~10, the
-   VPC origin ~8 (and about as long to delete), and the distribution
-   a few more. The apply waits for the service to be healthy.
-   **CI deploy key** (decision 11, once the app repo's pipeline exists):
-   `aws iam create-access-key --user-name "$(terraform -chdir=envs/poc output -raw ci_user_name)" --profile meridian`,
-   then put `AccessKeyId`/`SecretAccessKey` in the app repo's `poc`
-   environment secrets (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`).
-   Run it in a separate terminal (not `!` in Claude Code, which would
-   put the secret in the transcript), and never save the output to a
-   file or commit it. One key serves every pipeline run in a bring-up.
-   The key is deleted before destroy (step 6), so the GitHub secrets go
-   dead; just overwrite them at the next bring-up (deleting them is
-   optional tidiness). After the service is up, deploys go through the
-   pipeline, not `image_tag`.
-   **Confirm the SNS email** (Session 5): the apply sends an "AWS
-   Notification - Subscription Confirmation" email to `alert_email`.
-   Click the link in the newest one; until then alarms are silently
-   dropped. Check with `aws sns get-topic-attributes --topic-arn <arn>`
-   (`SubscriptionsConfirmed` = 1). The Budget emails directly and doesn't
-   need this.
-4. Seed (fresh DB each bring-up): `aws ecs run-task` with the
-   `task_definition` output, the public subnets, the app SG,
-   `assignPublicIp=ENABLED`, and a container override command
-   `["npx","tsx","prisma/seed.ts"]`.
-5. ECS Exec needs the Session Manager plugin
-   (`brew install --cask session-manager-plugin`):
-   `aws ecs execute-command --cluster meridian-poc --task <id> --container mcp-server --interactive --command "sh"`.
-6. Teardown. First delete the CI key, or the destroy fails at the end
-   on the IAM user with `DeleteConflict` (safe to re-run once it's gone):
-   `aws iam list-access-keys --user-name meridian-poc-github-deploy --profile meridian`,
-   then `aws iam delete-access-key --user-name meridian-poc-github-deploy --access-key-id <id> --profile meridian`.
-   Then `terraform -chdir=envs/poc plan -destroy -out=destroy.tfplan`,
-   review (an Opus moment), and `apply destroy.tfplan`: about 15
-   minutes, mostly the VPC origin. Afterwards deregister the
-   pipeline's task-definition revisions, which aren't in state:
-   `aws ecs list-task-definitions --family-prefix meridian-poc-mcp-server --status ACTIVE`
-   and `aws ecs deregister-task-definition` for each. Then read back that
-   nothing is left (state empty; no RDS, ALB, ECS, ECR, secrets,
-   CloudFront, VPC origin, non-default VPC, ENI, log group, or the CI
-   user). `aws cloudfront list-distributions` needs `--no-paginate` when
-   there are none, or the CLI prints nothing.
+@docs/runbook.md
 
 - Session 3b (branch `session-3b-cloudfront`, built 2026-10-08,
   verified 2026-11-02): `modules/edge` (CloudFront VPC origin +
@@ -383,10 +327,18 @@ repo's git short SHA).
    with a manual approval gate.~~ Done 2026-11-03.
 5. ~~Session 5: CloudWatch logs/alarms + the Budget alarm.~~ Done
    2026-11-06.
-6. Session 6: docs + wrap — architecture diagram, `docs/cost-notes.md`
+6. ~~Session 6: docs + wrap — architecture diagram, `docs/cost-notes.md`
    with actual observed spend vs. the original estimate, teardown/
    bring-up runbook, README tying back to the server repo's
-   `docs/production-path.md`.
+   `docs/production-path.md`.~~ Done 2026-11-06.
+
+The planned build is finished. Open items, none blocking:
+
+- Add the Session 5 bring-up's cost to `docs/cost-notes.md` once it posts
+  to Cost Explorer (billing lags 8–24 hours; see "How to re-check" there).
+- Confirm the Mermaid diagram in `docs/architecture.md` renders on GitHub.
+- Triage the 5 HIGH ECR scan findings on the Node 24 image (app repo).
+- The Budget's own alert emails are untested; only the alarm path is.
 
 ## AWS Agent Toolkit rules
 
