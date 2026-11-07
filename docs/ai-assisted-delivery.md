@@ -79,6 +79,9 @@ against the real resources with read-only AWS CLI calls, then destroy.
       `docs/architecture.md`, `docs/cost-notes.md` (built from Cost
       Explorer's gross usage), `docs/runbook.md` (moved out of
       CLAUDE.md), and the README rewrite
+- [x] Session 6: prompts for two Claude Design diagrams (runtime, and
+      delivery and operations), a review of each export against the
+      Terraform, and the README embeds
 
 ## What required architectural decisions
 
@@ -806,8 +809,30 @@ destroyed, which isn't true of this one; I caught that on a re-read and
 fixed it. The runbook's repo-structure edit in CLAUDE.md first missed
 because that tree uses different indentation than I assumed.
 
-**Still open.** The Session 5 bring-up hadn't posted to billing when I
-wrote the cost notes, so its cost isn't in the totals yet; add it when
-it posts. The Mermaid diagram hasn't been rendered in GitHub yet. The 5
-HIGH image-scan findings are still untriaged, and the Budget's own alert
+**Diagrams.** I wanted two README diagrams that show how the demo was
+taken to production. Claude wrote a detailed prompt for each (a shared
+style block, then one prompt per diagram) and I built them in Claude
+Design. Claude embedded the first exports in the README, then read each
+one against the Terraform and the verification record before I committed
+anything. That caught the
+things I'd have missed by eye: titles that wrapped over their subtitles,
+a few labels that collided, and, more importantly, upgrade tags and
+"demo" strips that described what the demo lacked ("Manual deploys",
+"Provider logs only", "Free tier, no guardrail"). Those claims came from
+Claude's prompt, not from my docs, so they were removed in favour of
+wording that only describes what production provides. The demo panel's
+remaining claims (Render and Vercel on the free tier, secrets as
+environment variables in the hosting dashboards) were checked against the
+server repo's `docs/production-path.md` and held. The first "re-export"
+turned out to be the old files, byte for byte, so that review found
+nothing new; the second export had the fixes. Everything else the
+diagrams state (the circuit breaker with rollback, the seven alarms, the
+$10 Budget, ports, the security group chain, the cost figures) matched
+the code and the numbers.
+
+**Still open.** The Session 5 bring-up still hadn't posted to billing
+by the evening of 2026-11-06, so its cost isn't in the cost notes yet.
+The Mermaid diagram in `architecture.md` hasn't been seen rendered on
+GitHub (the PNG diagrams in the README were checked). The 5 HIGH
+image-scan findings are still untriaged, and the Budget's own alert
 emails are still untested.
