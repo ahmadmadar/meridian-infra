@@ -26,26 +26,10 @@ Related repos:
 
 ## What gets built
 
-```
-                  Internet
-                     │ HTTPS (*.cloudfront.net)
-             ┌───────▼────────┐
-             │ CloudFront     │
-             └───────┬────────┘
-                     │ VPC origin: stays on AWS's network
-             ┌───────▼────────┐   private subnets (2 AZs)
-             │ Internal ALB   │   no public address
-             └───────┬────────┘
-                     │ 3001, ALB SG only
-             ┌───────▼────────┐   public subnets (2 AZs)
-             │ ECS Fargate    │   public IP for outbound only;
-             │ task (MCP)     │   SG blocks all inbound except the ALB
-             └───────┬────────┘
-                     │ 5432, app SG only
-             ┌───────▼────────┐   private subnets (2 AZs)
-             │ RDS Postgres   │   no route to the internet,
-             └────────────────┘   never publicly accessible
-```
+[![Runtime architecture, demo to production: clients reach CloudFront, which reaches an internal ALB over a VPC origin, then a Fargate task in a public subnet, then a private RDS Postgres database. A security group chain, Secrets Manager, ECR and CloudWatch Logs surround it, and a NAT Gateway is shown as deliberately absent.](docs/images/runtime-architecture.png)](docs/images/runtime-architecture.png)
+
+*Diagram 1: the runtime, from the free-tier demo (left) to the production
+build (right). Click for full size.*
 
 Around that path: Secrets Manager for the database URL and the MCP API
 keys, ECR for the image, CloudWatch Logs, seven CloudWatch alarms
@@ -80,6 +64,25 @@ decisions):
   sessions.** I'm the only operator, so these are deliberate scope calls
   rather than oversights. Each one says what would make me revisit it.
 
+## Delivery and operations
+
+[![Delivery, observability and cost control: a GitHub Actions pipeline with an approval gate, a CRITICAL scan gate and an ECS circuit breaker; seven CloudWatch alarms feeding SNS email; a $10 monthly Budget; and the plan, apply, verify, destroy, read-back lifecycle.](docs/images/delivery-and-operations.png)](docs/images/delivery-and-operations.png)
+
+*Diagram 2: everything around the runtime that makes it production-grade.
+Click for full size.*
+
+- **Gated deploys.** Tests run on every push. A release only runs from a
+  manual dispatch on `main`, behind a reviewer, and fails on any CRITICAL
+  image-scan finding. The ECS circuit breaker rolls back a failing
+  deploy.
+- **Alerting that's been proven.** Seven alarms notify through SNS. A
+  forced alarm produced both the ALARM and the OK email.
+- **A cost guardrail.** A $10 monthly Budget emails directly, separate
+  from SNS, on top of the free plan's hard spend cap.
+- **A lifecycle, not a one-off.** Plan, apply, verify against AWS,
+  destroy, then read back that nothing is left. The runbook is in
+  [`docs/runbook.md`](docs/runbook.md).
+
 ## Build status
 
 All six sessions are done. Sessions 1 to 5 each applied real
@@ -113,6 +116,7 @@ modules/
   ci/                IAM user and scoped policy for the app repo's pipeline
   observability/     log group, alarms, SNS topic, Budget
 docs/
+  images/                  the two architecture diagrams used in this README
   architecture.md          decisions and trade-offs, plus the full diagram
   runbook.md               bring-up, verification and teardown, step by step
   cost-notes.md            what it cost vs. what I estimated
